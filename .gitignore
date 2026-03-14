@@ -1,0 +1,31 @@
+# Dependencies — run "npm install" to recreate this
+node_modules/
+
+# Electron build output
+dist/
+out/
+build/
+
+# Whisper binaries and models (user downloads these locally on first run)
+whisper/
+*.bin
+*.dll
+
+# User data — contains API keys, never commit these
+config.json
+memory.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
