@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, clipboard, globalShortcut, Tray, Menu, nativeImage, dialog, screen, desktopCapturer } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, clipboard, globalShortcut, Tray, Menu, nativeImage, dialog, screen, desktopCapturer, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -62,7 +62,6 @@ app.whenReady().then(() => {
   createTray();
 
   // Grant microphone permission for voice input
-  const { session } = require('electron');
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     if (permission === 'media') return callback(true);
     callback(false);
@@ -89,9 +88,9 @@ ipcMain.on('window-maximize', () => {
 ipcMain.on('window-close', () => mainWindow?.hide());
 ipcMain.on('window-show',  () => {
   if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
-  mainWindow.restore(); // un-minimize if minimized
 });
 
 // ─── FILE OPERATIONS ─────────────────────────────────────────────────
@@ -241,8 +240,12 @@ ipcMain.handle('app-list-running', async () => {
 
 ipcMain.handle('app-kill', async (_, appName) => {
   try {
-    execSync(`taskkill /IM "${appName}" /F`, { encoding: 'utf8' });
-    return { ok: true, message: `Killed: ${appName}` };
+    // Sanitize — strip anything that isn't alphanumeric, dots, dashes, underscores
+    const safe = appName.replace(/[^a-zA-Z0-9.\-_]/g, '');
+    // Ensure .exe suffix for taskkill
+    const exe = safe.toLowerCase().endsWith('.exe') ? safe : `${safe}.exe`;
+    execSync(`taskkill /IM "${exe}" /F`, { encoding: 'utf8' });
+    return { ok: true, message: `Killed: ${exe}` };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
@@ -559,6 +562,7 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
     let fullText = '';
     let buffer   = '';
     let done     = false;
+    let hardTimer, pingTimer;
 
     function finish(err) {
       if (done) return;
@@ -577,13 +581,13 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
     }
 
     // Hard wall-clock timeout
-    const hardTimer = setTimeout(() => {
+    hardTimer = setTimeout(() => {
       req.destroy();
       finish('No response after 45s — model may be loading, try again');
     }, 45000);
 
     // Heartbeat ping so UI can show elapsed time
-    const pingTimer = setInterval(() => {
+    pingTimer = setInterval(() => {
       if (!done) mainWindow?.webContents.send('aria-stream-ping');
     }, 500);
 
@@ -646,12 +650,6 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
   });
 });
 
-// ── Ollama STREAMING (legacy alias — kept for compatibility) ──────────────
-ipcMain.handle('ollama-stream', async (_, modelName, messages, systemPrompt, host) => {
-  // Delegate to ollama-chat which now does streaming
-  return ipcMain.emit('ollama-chat', null, modelName, messages, systemPrompt, host);
-});
-
 // ─── CLAUDE AI PROXY ─────────────────────────────────────────────────
 
 ipcMain.handle('ai-message', async (_, apiKey, messages, systemPrompt) => {
@@ -693,7 +691,7 @@ ipcMain.handle('ai-message', async (_, apiKey, messages, systemPrompt) => {
       });
     });
     req.on('error', e => { if (!resolved) { resolved = true; clearTimeout(hardTimer); resolve({ ok: false, error: e.message }); } });
-    req.on('timeout', () => { req.destroy(); });
+    req.on('timeout', () => { req.destroy(); if (!resolved) { resolved = true; clearTimeout(hardTimer); resolve({ ok: false, error: 'Claude API request timed out' }); } });
     req.write(body);
     req.end();
   });
@@ -796,34 +794,23 @@ function whisperReady() {
 function downloadFile(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
-    const proto = url.startsWith('https') ? https : http;
-    const doGet = (u) => {
-      proto.get(u, (res) => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          doGet(res.headers.location); return;
-        }
-        if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return; }
-        const total = parseInt(res.headers['content-length'] || '0', 10);
-        let received = 0;
-        res.on('data', chunk => {
-          received += chunk.length;
-          if (total && onProgress) onProgress(Math.round(received / total * 100));
-        });
-        res.pipe(file);
-        file.on('finish', () => file.close(resolve));
-        file.on('error', reject);
-      }).on('error', reject);
-    };
-    // redirect-aware
-    const mod = require(url.startsWith('https') ? 'https' : 'http');
+    const mod = url.startsWith('https') ? https : http;
+
     const followRedirect = (u) => {
       const parsedUrl = new URL(u);
-      const options = { hostname: parsedUrl.hostname, path: parsedUrl.pathname + parsedUrl.search, headers: { 'User-Agent': 'ARIA-Assistant' } };
+      const options = {
+        hostname: parsedUrl.hostname,
+        path: parsedUrl.pathname + parsedUrl.search,
+        headers: { 'User-Agent': 'ARIA-Assistant' }
+      };
       mod.get(options, (res) => {
-        if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location) {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
           followRedirect(res.headers.location); return;
         }
-        if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode} from ${u}`)); return; }
+        if (res.statusCode !== 200) {
+          file.close();
+          reject(new Error(`HTTP ${res.statusCode} from ${u}`)); return;
+        }
         const total = parseInt(res.headers['content-length'] || '0', 10);
         let received = 0;
         res.on('data', chunk => {
@@ -832,8 +819,10 @@ function downloadFile(url, dest, onProgress) {
         });
         res.pipe(file);
         file.on('finish', () => file.close(resolve));
-      }).on('error', reject);
+        file.on('error', (err) => { file.close(); reject(err); });
+      }).on('error', (err) => { file.close(); reject(err); });
     };
+
     followRedirect(url);
   });
 }
@@ -875,18 +864,21 @@ async function setupWhisper(event) {
         return null;
       };
       const found = findCli(WHISPER_DIR);
-      if (!found) throw new Error('whisper-cli.exe not found in zip');
-      // Move it to WHISPER_DIR root if it's in a subfolder
+      if (!found) throw new Error('whisper-cli.exe not found in zip — try downloading manually');
+      // Copy exe to WHISPER_DIR root if it's nested in a subfolder
       if (found !== WHISPER_CLI) fs.copyFileSync(found, WHISPER_CLI);
-      // Also copy any .dll files needed
+      // Copy required DLLs from the same folder as the exe
       const dllDir = path.dirname(found);
-      for (const f of fs.readdirSync(dllDir)) {
-        if (f.endsWith('.dll')) {
-          const src = path.join(dllDir, f);
-          const dst = path.join(WHISPER_DIR, f);
-          if (!fs.existsSync(dst)) fs.copyFileSync(src, dst);
+      if (dllDir !== WHISPER_DIR) {
+        for (const f of fs.readdirSync(dllDir)) {
+          if (f.endsWith('.dll') || f.endsWith('.ggml')) {
+            const src = path.join(dllDir, f);
+            const dst = path.join(WHISPER_DIR, f);
+            if (!fs.existsSync(dst)) fs.copyFileSync(src, dst);
+          }
         }
       }
+      // Zip cleanup last — after everything is safely copied
       try { fs.unlinkSync(zipPath); } catch(_) {}
       send('whisper-cli.exe ready', 55);
     }
@@ -915,39 +907,40 @@ ipcMain.handle('whisper-status', async () => {
 ipcMain.handle('whisper-transcribe', async (event, audioBuffer) => {
   if (!whisperReady()) return { ok: false, error: 'Whisper not set up. Click the mic and run setup first.' };
 
-  const tmpWav = path.join(WHISPER_DIR, `rec_${Date.now()}.wav`);
-  const tmpBuf = Buffer.from(audioBuffer);
+  // MediaRecorder outputs WebM/Opus — whisper-cli accepts it directly
+  const tmpFile = path.join(WHISPER_DIR, `rec_${Date.now()}.webm`);
+  const tmpBuf  = Buffer.from(audioBuffer);
 
   try {
-    fs.writeFileSync(tmpWav, tmpBuf);
+    fs.writeFileSync(tmpFile, tmpBuf);
 
     const transcript = await new Promise((resolve, reject) => {
-      // -nt = no timestamps, -l en, output to stdout
-      const args = ['-m', WHISPER_MODEL, '-f', tmpWav, '-l', 'en', '-nt', '--no-prints'];
+      const args = ['-m', WHISPER_MODEL, '-f', tmpFile, '-l', 'en', '-nt', '--no-prints'];
       const proc = spawn(WHISPER_CLI, args, { cwd: WHISPER_DIR });
 
       let out = '', err = '';
       proc.stdout.on('data', d => out += d.toString());
       proc.stderr.on('data', d => err += d.toString());
       proc.on('close', code => {
-        if (code !== 0 && !out.trim()) reject(new Error(err || `whisper-cli exited ${code}`));
-        else resolve(out.trim() || err.trim()); // whisper sometimes writes to stderr
+        if (code !== 0 && !out.trim()) reject(new Error(err.trim() || `whisper-cli exited with code ${code}`));
+        else resolve(out.trim() || err.trim());
       });
       proc.on('error', reject);
-      // 30s timeout
-      setTimeout(() => { try { proc.kill(); } catch(_) {} reject(new Error('Whisper timeout')); }, 30000);
+      // 30s hard timeout
+      const timer = setTimeout(() => { try { proc.kill(); } catch(_) {} reject(new Error('Whisper timed out')); }, 30000);
+      proc.on('close', () => clearTimeout(timer));
     });
 
-    // Clean up transcript markers whisper adds like [BLANK_AUDIO] or (silence)
     const clean = transcript
-      .replace(/\[.*?\]/g, '')
-      .replace(/\(.*?\)/g, '')
+      .replace(/\[.*?\]/g, '')   // [BLANK_AUDIO], [Music], etc.
+      .replace(/\(.*?\)/g, '')   // (silence), etc.
+      .replace(/\s+/g, ' ')
       .trim();
 
     return { ok: true, text: clean };
   } catch(e) {
     return { ok: false, error: e.message };
   } finally {
-    try { fs.unlinkSync(tmpWav); } catch(_) {}
+    try { fs.unlinkSync(tmpFile); } catch(_) {}
   }
 });

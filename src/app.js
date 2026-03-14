@@ -13,7 +13,27 @@ const state = {
   currentPath:  null,
   sysInfo:      null,
   isLoading:    false,
-  memory:       [],   // loaded command memory
+  memory:       [],
+};
+
+// Declared here so boot sequence can access them before their sections are reached
+const voice = {
+  mediaRecorder: null,
+  active:        false,
+  chunks:        [],
+  stream:        null,
+  recognition:   null, // stub for hotword compatibility
+};
+
+const whisperState = { ready: false, setting_up: false };
+
+const hotword = {
+  recognition:  null,
+  active:       false,
+  enabled:      false,
+  PHRASE:       'hey aria',
+  ALT_PHRASES:  ['hey area', 'hey era', 'a aria', 'hey raya'],
+  restartTimer: null,
 };
 
 const $  = id  => document.getElementById(id);
@@ -302,8 +322,7 @@ async function fuzzyConfirmAsk() {
   const { originalText } = fuzzyPending;
   hideFuzzyConfirm();
   if (!originalText) return;
-  // Re-inject the original text and route to AI
-  state.messages.push({ role: 'user', content: originalText });
+  // message already pushed to state.messages in sendMessage — go straight to AI
   await _sendToAI(originalText);
 }
 
@@ -332,6 +351,8 @@ async function sendMessage() {
   // ── FUZZY match (0.60–0.94) — show "Run again?" confirm ─────────────
   const fuzzyHit = memoryFuzzyMatch(text);
   if (fuzzyHit) {
+    // Store text so fuzzyConfirmAsk can use it without double-pushing
+    state.messages.push({ role: 'user', content: text });
     showFuzzyConfirm(text, fuzzyHit);
     return;
   }
@@ -915,8 +936,13 @@ async function saveOllamaHost() {
 async function saveClaudeKey() {
   const k = el('claude-key-input')?.value?.trim();
   if (!k?.startsWith('sk-ant')) { toast('Invalid key', 'error'); return; }
-  try { await window.aria.storeApiKey(k); } catch(_){}
-  state.claudeApiKey = k; toast('Claude key saved!', 'success');
+  try {
+    await window.aria.storeApiKey(k);
+    await window.aria.saveConfig({ apiKey: k });
+  } catch(_){}
+  state.claudeApiKey = k;
+  updateBadges();
+  toast('Claude key saved!', 'success');
 }
 
 async function doPull() {
@@ -1089,7 +1115,6 @@ function gotoPanel(p) {
   if (p === 'macros') renderMacros();
 }
 
-/* ─── Macros Panel ──────────────────────────────────────────────── */
 /* ─── History Panel ─────────────────────────────────────────────── */
 function renderMacros() {
   const list = el('macros-list');
@@ -1248,17 +1273,6 @@ function renderSystemInfo(info) {
 }
 
 /* ─── Voice Input (Whisper local STT) ───────────────────────────── */
-const voice = {
-  mediaRecorder: null,
-  active:        false,
-  chunks:        [],
-  stream:        null,
-  // Keep a stub recognition object for hotword compatibility
-  recognition:   null,
-};
-
-// Whisper setup state
-const whisperState = { ready: false, setting_up: false };
 
 async function checkWhisperReady() {
   try {
@@ -1373,8 +1387,11 @@ function _voiceStop() {
 }
 
 async function _onRecordingStop() {
-  const blob = new Blob(voice.chunks, { type: voice.mediaRecorder?.mimeType || 'audio/webm' });
+  // Capture chunks snapshot immediately — ondataavailable may still fire after onstop
+  const chunks = [...voice.chunks];
   voice.chunks = [];
+
+  const blob = new Blob(chunks, { type: voice.mediaRecorder?.mimeType || 'audio/webm' });
 
   if (blob.size < 1000) {
     setMicState('idle');
@@ -1472,14 +1489,6 @@ document.addEventListener('keydown', (e) => {
 
 
 /* ─── Hotword Engine ("Hey ARIA") ───────────────────────────────── */
-const hotword = {
-  recognition: null,
-  active:      false,
-  enabled:     false,
-  PHRASE:      'hey aria',       // what to listen for
-  ALT_PHRASES: ['hey area', 'hey era', 'a aria', 'hey raya'],  // common mishears
-  restartTimer: null,
-};
 
 function initHotword() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1627,9 +1636,6 @@ function updateHotwordPill() {
 }
 
 // ── Pause hotword while command mic is active, resume after ──────
-const _origToggleVoice = toggleVoice;
-// Hook: stop hotword when command mic starts
-const _origInitVoice = initVoice;
 
 // Watch window visibility — restart hotword when window hides
 try {
@@ -1643,7 +1649,6 @@ try {
 } catch(_) {}
 
 // Also pause hotword when command mic is in use
-const _origVoiceStart = voice;
 document.addEventListener('aria-voice-start', () => { if (hotword.active) stopHotword(); });
 document.addEventListener('aria-voice-end',   () => {
   if (hotword.enabled) scheduleHotwordRestart(1000);
