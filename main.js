@@ -29,7 +29,7 @@ function createWindow() {
     titleBarStyle: 'hidden',
   });
 
-  mainWindow.loadFile('src/index.html');
+  mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
   mainWindow.on('closed', () => { mainWindow = null; });

@@ -1,8 +1,10 @@
 # Dependencies — run "npm install" to recreate this
 node_modules/
 
-# Electron build output
+# Vite / React build output — run "npm run build" to recreate
 dist/
+
+# Electron build output
 out/
 build/
 

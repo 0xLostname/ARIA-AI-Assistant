@@ -1,31 +1,41 @@
 {
   "name": "aria-assistant",
-  "version": "1.0.0",
-  "description": "ARIA - AI Desktop Assistant powered by Claude",
+  "version": "2.3.0",
+  "description": "ARIA - AI Desktop Assistant powered by Ollama / Claude",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
-    "build": "electron-builder --win --x64",
-    "pack": "electron-builder --dir"
+    "dev":      "vite",
+    "build":    "vite build",
+    "start":    "npm run build && electron .",
+    "electron": "electron .",
+    "dist":     "npm run build && electron-builder --win --x64",
+    "pack":     "npm run build && electron-builder --dir"
   },
   "build": {
     "appId": "com.aria.assistant",
     "productName": "ARIA Assistant",
+    "files": [
+      "dist/**/*",
+      "main.js",
+      "preload.js",
+      "assets/**/*"
+    ],
     "win": {
       "target": "portable",
       "icon": "assets/icon.ico"
     },
     "portable": {
       "artifactName": "ARIA-Assistant-Setup.exe"
-    },
-    "files": [
-      "**/*",
-      "!node_modules/.cache",
-      "!*.md"
-    ]
+    }
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
     "electron": "^28.0.0",
-    "electron-builder": "^24.9.1"
+    "electron-builder": "^24.9.1",
+    "vite": "^5.4.2"
   }
 }

@@ -1,0 +1,188 @@
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap');
+
+/* ── Reset ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* ── CSS Variables ──────────────────────────────────────────────── */
+:root {
+  --cyan:          #00d4ff;
+  --cyan-dim:      rgba(0, 212, 255, 0.15);
+  --cyan-border:   rgba(0, 212, 255, 0.25);
+  --purple:        #7b2fff;
+  --purple-dim:    rgba(123, 47, 255, 0.15);
+  --green:         #00ff88;
+  --red:           #ff4466;
+  --yellow:        #ffcc00;
+  --bg:            #050810;
+  --bg2:           #080d1a;
+  --bg3:           #0a1020;
+  --text:          rgba(255,255,255,0.9);
+  --text-dim:      rgba(255,255,255,0.45);
+  --text-faint:    rgba(255,255,255,0.18);
+  --mono:          'Share Tech Mono', monospace;
+  --sans:          'Rajdhani', sans-serif;
+}
+
+/* ── Base ───────────────────────────────────────────────────────── */
+html, body, #root {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0,212,255,0.25); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,212,255,0.5); }
+
+/* ── App Shell ──────────────────────────────────────────────────── */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  position: relative;
+  overflow: hidden;
+}
+
+/* ── Background FX ──────────────────────────────────────────────── */
+.bg-grid {
+  position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+.bg-glow {
+  position: fixed; pointer-events: none; z-index: 0;
+  border-radius: 50%; filter: blur(80px); opacity: 0.12;
+}
+.bg-glow-1 { width: 500px; height: 400px; background: var(--cyan);   top: -100px;    left: -100px; }
+.bg-glow-2 { width: 400px; height: 500px; background: var(--purple); bottom: -100px; right: -100px; }
+
+.scanline {
+  position: fixed; left: 0; right: 0; height: 2px;
+  pointer-events: none; z-index: 999;
+  background: linear-gradient(90deg, transparent, rgba(0,212,255,0.2), transparent);
+  animation: scanline 8s linear infinite;
+}
+@keyframes scanline { 0% { top: -4px; } 100% { top: 100%; } }
+
+/* ── Main layout ────────────────────────────────────────────────── */
+.main-layout {
+  display: flex; flex: 1; overflow: hidden;
+  position: relative; z-index: 1;
+}
+
+/* ── Content area ───────────────────────────────────────────────── */
+.content-area {
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
+}
+
+/* ── Status pills ───────────────────────────────────────────────── */
+.status-pill {
+  padding: 2px 7px; border-radius: 3px;
+  font-family: var(--mono); font-size: 8px; font-weight: 700;
+  letter-spacing: 1.5px; border: 1px solid;
+}
+.status-pill.online  { border-color: rgba(0,255,136,0.35); color: var(--green);  background: rgba(0,255,136,0.06); }
+.status-pill.offline { border-color: rgba(255,255,255,0.1); color: var(--text-faint); background: transparent; }
+.status-pill.ai      { border-color: rgba(0,212,255,0.35); color: var(--cyan);   background: rgba(0,212,255,0.06); }
+.status-pill.online { animation: pillPulse 2.5s ease-in-out infinite; }
+@keyframes pillPulse { 0%,100%{opacity:1} 50%{opacity:0.55} }
+
+/* ── Loading bar ────────────────────────────────────────────────── */
+.loading-bar {
+  height: 2px; background: var(--cyan-dim);
+  border-radius: 1px; overflow: hidden; flex-shrink: 0;
+}
+.loading-bar-inner {
+  height: 100%; width: 30%; background: var(--cyan);
+  animation: loadBar 1s ease-in-out infinite; border-radius: 1px;
+}
+@keyframes loadBar { 0%{transform:translateX(-100%)} 100%{transform:translateX(400%)} }
+
+/* ── Toast ──────────────────────────────────────────────────────── */
+.toast {
+  position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%) translateY(20px);
+  background: rgba(8,13,26,0.97); border: 1px solid rgba(0,212,255,0.2);
+  border-radius: 8px; padding: 10px 18px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.5px;
+  color: var(--text); white-space: nowrap; z-index: 1000;
+  opacity: 0; transition: opacity 0.2s, transform 0.2s;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.success { border-color: rgba(0,255,136,0.3); color: var(--green); }
+.toast.error   { border-color: rgba(255,68,102,0.3); color: var(--red); }
+.toast.info    { border-color: rgba(0,212,255,0.2);  color: var(--cyan); }
+
+/* ── Animations ─────────────────────────────────────────────────── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes confirmSlideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes micPulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(255,68,102,0.4); }
+  50%     { box-shadow: 0 0 0 6px rgba(255,68,102,0); }
+}
+@keyframes pulse-dot {
+  0%,100% { opacity:1; transform:scale(1); }
+  50%     { opacity:0.6; transform:scale(0.8); }
+}
+
+/* ── Toggle switch ──────────────────────────────────────────────── */
+.toggle-switch {
+  position: relative; display: inline-block;
+  width: 36px; height: 20px; flex-shrink: 0;
+}
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute; cursor: pointer; inset: 0;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 20px; transition: 0.2s;
+}
+.toggle-slider:before {
+  content: ''; position: absolute;
+  width: 14px; height: 14px; left: 2px; top: 2px;
+  background: rgba(255,255,255,0.5); border-radius: 50%; transition: 0.2s;
+}
+.toggle-switch input:checked + .toggle-slider {
+  background: rgba(0,212,255,0.25);
+  border-color: rgba(0,212,255,0.5);
+}
+.toggle-switch input:checked + .toggle-slider:before {
+  transform: translateX(16px);
+  background: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan);
+}
+
+/* ── Cursor blink ───────────────────────────────────────────────── */
+.cursor-blink {
+  display: inline-block; color: var(--cyan); opacity: 1;
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+/* ── Src badge ──────────────────────────────────────────────────── */
+.src-badge {
+  font-family: var(--mono); font-size: 8px;
+  color: var(--text-faint); letter-spacing: 1px;
+}
+
+/* ── Empty state ────────────────────────────────────────────────── */
+.empty-state {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 10px; color: var(--text-faint);
+  font-family: var(--mono); font-size: 11px; letter-spacing: 1px;
+}
+.empty-state .icon { font-size: 36px; opacity: 0.4; }
