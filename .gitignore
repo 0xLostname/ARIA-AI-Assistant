@@ -32,4 +32,16 @@ npm-debug.log*
 *.swp
 *.swo
 
+# Build outputs
 release/
+
+# Electron build files
+*.exe
+*.dmg
+*.deb
+*.rpm
+
+# Environment variables
+.env
+.env.local
+
