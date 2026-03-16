@@ -64,7 +64,6 @@ export function useChat({
 }) {
 
   const [messages,     setMessages]     = useState([]);
-  const [history,      setHistory]      = useState([]);
   const [isLoading,    setIsLoading]    = useState(false);
   const [fuzzyPending, setFuzzyPending] = useState(null);
 
@@ -86,9 +85,6 @@ export function useChat({
 
   const addAiMsg = useCallback((text, result, model, elapsed) =>
     setMessages(prev => [...prev, { id: nextId(), role: 'ai', text, result, model, elapsed, timestamp: nowStr() }]), []);
-
-  const pushHistory = useCallback((role, content) =>
-    setHistory(prev => [...prev.slice(-10), { role, content }]), []);
 
   // ── Streaming bubble update ───────────────────────────────────
   const updateStreamMsg = useCallback((id, patch) =>
@@ -146,7 +142,7 @@ export function useChat({
         elapsed,
       });
 
-      pushHistory('assistant', fullText);
+      
     });
 
     window.aria.onStreamError((err) => {
@@ -164,7 +160,7 @@ export function useChat({
       setIsLoading(false);
       updateStreamMsg(msgId, { text: `\u26a0\ufe0f ${r.error}`, isStreaming: false });
     }
-  }, [ollamaModel, ollamaHost, parseAndRun, memorySave, updateStreamMsg, pushHistory]);
+  }, [ollamaModel, ollamaHost, parseAndRun, memorySave, updateStreamMsg]);
 
   // ── Shared Claude request runner ──────────────────────────────
   const _runClaudeRequest = useCallback(async (originalText, ctx, prompt) => {
@@ -176,12 +172,12 @@ export function useChat({
       const display = stripJson(raw);
       const result  = await parseAndRun(raw, originalText, memorySave);
       addAiMsg(display || '\u2713', result, 'Claude');
-      pushHistory('assistant', raw);
+      
     } catch(e) {
       setIsLoading(false);
       addAiMsg(`\u26a0\ufe0f ${e.message}`, null, 'Claude');
     }
-  }, [claudeApiKey, parseAndRun, memorySave, addAiMsg, pushHistory]);
+  }, [claudeApiKey, parseAndRun, memorySave, addAiMsg]);
 
   // ── Core send logic ───────────────────────────────────────────
   const sendMessage = useCallback(async (text) => {
@@ -210,7 +206,7 @@ export function useChat({
     const fuzzyHit = memoryFuzzyMatch(text);
     if (fuzzyHit) {
       addUserMsg(text);
-      pushHistory('user', text);
+      
       setFuzzyPending({ entry: fuzzyHit, originalText: text });
       return;
     }
@@ -221,19 +217,19 @@ export function useChat({
     }
 
     addUserMsg(text);
-    pushHistory('user', text);
+    
     setIsLoading(true);
 
     const prompt = buildPrompt(sysInfo);
-    const ctx    = history.slice(-6);
+    
 
-    if (useOllama) await _runOllamaStream(text, ctx, prompt);
-    else           await _runClaudeRequest(text, ctx, prompt);
+    if (useOllama) await _runOllamaStream(text, [], prompt);
+    else           await _runClaudeRequest(text, [], prompt);
   }, [
     isLoading, ollamaRunning, ollamaModel, ollamaHost,
-    claudeApiKey, aiMode, sysInfo, history,
+    claudeApiKey, aiMode, sysInfo,
     memoryExactMatch, memoryFuzzyMatch, memorySave,
-    addUserMsg, addAiMsg, pushHistory, runAction, showToast,
+    addUserMsg, addAiMsg, runAction, showToast,
     _runOllamaStream, _runClaudeRequest,
   ]);
 
@@ -264,17 +260,16 @@ export function useChat({
 
     setIsLoading(true);
     const prompt = buildPrompt(sysInfo);
-    const ctx    = history.slice(-6);
-    if (useOllama) await _runOllamaStream(originalText, ctx, prompt);
-    else           await _runClaudeRequest(originalText, ctx, prompt);
+    
+    if (useOllama) await _runOllamaStream(originalText, [], prompt);
+    else           await _runClaudeRequest(originalText, [], prompt);
   }, [
     fuzzyPending, ollamaRunning, ollamaModel, claudeApiKey,
-    aiMode, sysInfo, history, _runOllamaStream, _runClaudeRequest, showToast,
+    aiMode, sysInfo, _runOllamaStream, _runClaudeRequest, showToast,
   ]);
 
   const clearMessages = useCallback(() => {
     setMessages([]);
-    setHistory([]);
   }, []);
 
   return {

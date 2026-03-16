@@ -220,10 +220,11 @@ ipcMain.handle('fs-write', async (_, filePath, content) => {
 ipcMain.handle('app-launch', async (_, appName) => {
   try {
     const cmd = getLaunchCommand(appName);
+    console.log(`[ARIA] launch: ${cmd}`);
     exec(cmd, { shell: true }, (err) => {
       if (err) console.log('Launch note:', err.message);
     });
-    return { ok: true, message: `Launching: ${appName}` };
+    return { ok: true, message: `Launching ${appName}` };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
@@ -790,38 +791,192 @@ function searchRecursive(dir, query, results, depth, maxDepth) {
   } catch (_) {}
 }
 
+// ── App name aliases (common shorthand → search term) ────────────────
+const APP_ALIASES = {
+  'chrome': 'google chrome',
+  'vscode': 'visual studio code',
+  'vs code': 'visual studio code',
+  'code': 'visual studio code',
+  'word': 'microsoft word',
+  'excel': 'microsoft excel',
+  'powerpoint': 'microsoft powerpoint',
+  'outlook': 'microsoft outlook',
+  'teams': 'microsoft teams',
+  'edge': 'microsoft edge',
+  'file explorer': 'explorer',
+  'files': 'explorer',
+  'terminal': 'windows terminal',
+  'wt': 'windows terminal',
+};
+
+// ── Built-in Windows commands that need special handling ─────────────
+const BUILTIN_COMMANDS = {
+  'explorer':      'explorer.exe',
+  'file explorer': 'explorer.exe',
+  'notepad':       'notepad.exe',
+  'calculator':    'calc.exe',
+  'calc':          'calc.exe',
+  'paint':         'mspaint.exe',
+  'mspaint':       'mspaint.exe',
+  'cmd':           'cmd.exe',
+  'powershell':    'powershell.exe',
+  'task manager':  'taskmgr.exe',
+  'taskmgr':       'taskmgr.exe',
+  'control panel': 'control.exe',
+  'control':       'control.exe',
+  'regedit':       'regedit.exe',
+  'snipping tool': 'SnippingTool.exe',
+};
+
+// ── Search the Windows registry for an installed app path ────────────
+function findAppInRegistry(name) {
+  const hives = [
+    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths',
+    'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths',
+    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths',
+  ];
+  for (const hive of hives) {
+    try {
+      const out = execSync(
+        `reg query "${hive}" /s /f "${name}" /k 2>nul`,
+        { encoding: 'utf8', timeout: 3000 }
+      );
+      // Extract any .exe path from the output
+      const match = out.match(/REG_SZ\s+([^\r\n]+\.exe)/i);
+      if (match) {
+        const exePath = match[1].trim().replace(/^"|"$/g, '');
+        if (fs.existsSync(exePath)) return exePath;
+      }
+      // Also try reading the default value of matching subkeys
+      const keyMatch = out.match(new RegExp(`${hive.replace(/\\/g, '\\\\')}\\\\([^\\r\\n]+)`, 'i'));
+      if (keyMatch) {
+        try {
+          const val = execSync(
+            `reg query "${hive}\\${keyMatch[1]}" /ve 2>nul`,
+            { encoding: 'utf8', timeout: 2000 }
+          );
+          const pathMatch = val.match(/REG_SZ\s+([^\r\n]+\.exe)/i);
+          if (pathMatch) {
+            const p = pathMatch[1].trim().replace(/^"|"$/g, '');
+            if (fs.existsSync(p)) return p;
+          }
+        } catch(_) {}
+      }
+    } catch(_) {}
+  }
+  return null;
+}
+
+// ── Search Start Menu .lnk shortcuts for an app name ────────────────
+function findAppInStartMenu(name) {
+  const dirs = [
+    path.join(process.env.APPDATA  || '', 'Microsoft\\Windows\\Start Menu\\Programs'),
+    path.join(process.env.ProgramData || 'C:\\ProgramData', 'Microsoft\\Windows\\Start Menu\\Programs'),
+  ];
+  const lower = name.toLowerCase();
+
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    try {
+      // Use dir /s /b to get all .lnk files recursively
+      const out = execSync(`dir "${dir}" /s /b /a:-d 2>nul`, { encoding: 'utf8', timeout: 4000 });
+      const lines = out.split('\n').map(l => l.trim()).filter(l => l.endsWith('.lnk'));
+
+      // Score each shortcut by how well it matches
+      let best = null, bestScore = 0;
+      for (const lnk of lines) {
+        const lnkName = path.basename(lnk, '.lnk').toLowerCase();
+        let score = 0;
+        if (lnkName === lower)                score = 100;
+        else if (lnkName.startsWith(lower))   score = 80;
+        else if (lnkName.includes(lower))     score = 60;
+        else if (lower.includes(lnkName) && lnkName.length > 3) score = 40;
+        if (score > bestScore) { bestScore = score; best = lnk; }
+      }
+
+      if (best && bestScore >= 40) {
+        // Resolve the .lnk to its target exe using PowerShell
+        try {
+          const ps = `(New-Object -ComObject WScript.Shell).CreateShortcut('${best.replace(/'/g, "''")}').TargetPath`;
+          const target = execSync(
+            `powershell -NoProfile -Command "${ps}" 2>nul`,
+            { encoding: 'utf8', timeout: 3000 }
+          ).trim();
+          if (target && fs.existsSync(target)) return target;
+          // Some shortcuts point to folders or UWP apps — fall back to launching the .lnk directly
+          if (target) return `"${best}"`;
+        } catch(_) {
+          return `"${best}"`;  // launch the shortcut directly as fallback
+        }
+      }
+    } catch(_) {}
+  }
+  return null;
+}
+
+// ── Search common install directories for an exe matching the name ──
+function findAppInCommonDirs(name) {
+  const roots = [
+    process.env.ProgramFiles        || 'C:\\Program Files',
+    process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+    process.env.LOCALAPPDATA        ? path.join(process.env.LOCALAPPDATA, 'Programs') : null,
+    process.env.APPDATA             ? path.join(process.env.APPDATA, 'Local\\Programs') : null,
+  ].filter(Boolean);
+
+  const lower = name.toLowerCase().replace(/\s+/g, '');
+
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    try {
+      const out = execSync(
+        `dir "${root}" /s /b /a:-d 2>nul | findstr /i ".exe$"`,
+        { encoding: 'utf8', timeout: 5000 }
+      );
+      const exes = out.split('\n').map(l => l.trim()).filter(Boolean);
+
+      let best = null, bestScore = 0;
+      for (const exe of exes) {
+        const exeName = path.basename(exe, '.exe').toLowerCase().replace(/\s+/g, '');
+        let score = 0;
+        if (exeName === lower)                score = 100;
+        else if (exeName.startsWith(lower))   score = 70;
+        else if (lower.startsWith(exeName) && exeName.length > 3) score = 60;
+        else if (exeName.includes(lower))     score = 50;
+        // Boost if parent folder name also matches
+        const folder = path.basename(path.dirname(exe)).toLowerCase().replace(/\s+/g, '');
+        if (folder.includes(lower) || lower.includes(folder)) score += 10;
+        if (score > bestScore) { bestScore = score; best = exe; }
+      }
+      if (best && bestScore >= 50) return best;
+    } catch(_) {}
+  }
+  return null;
+}
+
+// ── Master launcher — tries every strategy in order ─────────────────
 function getLaunchCommand(appName) {
-  const apps = {
-    'chrome': 'start chrome',
-    'google chrome': 'start chrome',
-    'firefox': 'start firefox',
-    'edge': 'start msedge',
-    'notepad': 'start notepad',
-    'calculator': 'start calc',
-    'paint': 'start mspaint',
-    'word': 'start winword',
-    'excel': 'start excel',
-    'powerpoint': 'start powerpnt',
-    'explorer': 'start explorer',
-    'file explorer': 'start explorer',
-    'cmd': 'start cmd',
-    'terminal': 'start wt',
-    'powershell': 'start powershell',
-    'task manager': 'start taskmgr',
-    'control panel': 'start control',
-    'spotify': 'start spotify',
-    'discord': 'start discord',
-    'steam': 'start steam',
-    'vlc': 'start vlc',
-    'vscode': 'start code',
-    'vs code': 'start code',
-    'visual studio code': 'start code',
-    'zoom': 'start zoom',
-    'slack': 'start slack',
-    'teams': 'start teams',
-  };
-  const key = appName.toLowerCase().trim();
-  return apps[key] || `start ${appName}`;
+  const key   = appName.toLowerCase().trim();
+  const term  = APP_ALIASES[key] || key;
+  const termNorm = term.replace(/\s+/g, '');
+
+  // 1. Built-in Windows commands
+  if (BUILTIN_COMMANDS[key])   return `start "" "${BUILTIN_COMMANDS[key]}"`;
+  if (BUILTIN_COMMANDS[term])  return `start "" "${BUILTIN_COMMANDS[term]}"`;
+
+  // 2. Registry App Paths
+  const regPath = findAppInRegistry(term) || findAppInRegistry(termNorm);
+  if (regPath) return `start "" "${regPath}"`;
+
+  // 3. Start Menu shortcuts
+  const lnkPath = findAppInStartMenu(term);
+  if (lnkPath) return lnkPath.startsWith('"') ? `start "" ${lnkPath}` : `start "" "${lnkPath}"`;
+
+  // 4. Common install directories
+  const dirPath = findAppInCommonDirs(term) || findAppInCommonDirs(termNorm);
+  if (dirPath) return `start "" "${dirPath}"`;
+
+  // 5. Last resort — let Windows try to find it by name (works for PATH apps)
+  return `start "" "${appName}"`;
 }
 
 function formatUptime(seconds) {
