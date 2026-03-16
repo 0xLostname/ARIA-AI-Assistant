@@ -46,10 +46,6 @@
     },
     "portable": {
       "artifactName": "ARIA-Assistant-Portable-${version}.exe"
-    },
-    "publish": {
-      "provider": "github",
-      "releaseType": "release"
     }
   },
   "dependencies": {
