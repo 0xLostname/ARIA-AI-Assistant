@@ -44,4 +44,5 @@ release/
 # Environment variables
 .env
 .env.local
+*.blockmap
 
