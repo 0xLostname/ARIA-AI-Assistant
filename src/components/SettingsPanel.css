@@ -1,0 +1,163 @@
+#panel-settings {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  background: var(--bg2);
+}
+
+.settings-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+/* ── Section ──────────────────────────────────────────────────── */
+.settings-section {
+  margin-bottom: 32px;
+}
+.settings-section h3 {
+  font-family: var(--mono); font-size: 10px;
+  letter-spacing: 2.5px; color: var(--cyan);
+  text-transform: uppercase; margin-bottom: 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(0,212,255,0.1);
+}
+
+/* ── Row ──────────────────────────────────────────────────────── */
+.settings-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.settings-row label {
+  flex: 1; min-width: 70px;
+  font-family: var(--sans); font-size: 13px; color: var(--text-dim);
+}
+.settings-row input[type="text"],
+.settings-row input[type="password"] {
+  flex: 2;
+  background: rgba(0,212,255,0.05);
+  border: 1px solid rgba(0,212,255,0.2);
+  border-radius: 7px; padding: 8px 12px;
+  color: var(--text); font-family: var(--mono);
+  font-size: 11px; outline: none; transition: border-color 0.2s;
+}
+.settings-row input:focus { border-color: rgba(0,212,255,0.5); }
+
+.btn-save {
+  padding: 7px 16px; border-radius: 7px;
+  background: rgba(0,212,255,0.15);
+  border: 1px solid var(--cyan-border);
+  color: var(--cyan); cursor: pointer;
+  font-family: var(--mono); font-size: 10px;
+  transition: all 0.15s; letter-spacing: 1px;
+  white-space: nowrap;
+}
+.btn-save:hover:not(:disabled) { background: rgba(0,212,255,0.3); }
+.btn-save:disabled { opacity: 0.4; cursor: default; }
+
+.settings-select {
+  flex: 2;
+  background: rgba(0,212,255,0.05);
+  border: 1px solid rgba(0,212,255,0.2);
+  border-radius: 7px; padding: 8px 12px;
+  color: var(--text); font-family: var(--mono);
+  font-size: 11px; outline: none; cursor: pointer;
+}
+.settings-select option { background: var(--bg2); }
+
+.status-text {
+  flex: 2; font-family: var(--mono); font-size: 11px;
+}
+
+.section-note {
+  font-family: var(--mono); font-size: 9px;
+  color: var(--text-faint); margin-top: 6px;
+  line-height: 1.7;
+}
+.section-note code {
+  color: var(--cyan); font-size: 9px;
+}
+
+/* ── Toggle row ───────────────────────────────────────────────── */
+.toggle-row {
+  flex: 2; display: flex; align-items: center; gap: 10px;
+}
+.toggle-label {
+  font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+}
+
+/* ── Pull model ───────────────────────────────────────────────── */
+.pull-row {
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  gap: 10px !important;
+}
+.pull-input-row {
+  display: flex; gap: 8px; width: 100%;
+}
+.pull-input-row input {
+  flex: 1;
+  background: rgba(0,212,255,0.05);
+  border: 1px solid rgba(0,212,255,0.2);
+  border-radius: 7px; padding: 8px 12px;
+  color: var(--text); font-family: var(--mono);
+  font-size: 11px; outline: none; transition: border-color 0.2s;
+}
+.pull-input-row input:focus { border-color: rgba(0,212,255,0.5); }
+.pull-status {
+  font-family: var(--mono); font-size: 9px; margin-top: -4px;
+}
+.model-chips {
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.model-chip {
+  padding: 3px 9px; border-radius: 4px;
+  font-family: var(--mono); font-size: 9px;
+  border: 1px solid rgba(0,212,255,0.2);
+  color: var(--text-dim); cursor: pointer;
+  background: rgba(0,212,255,0.04);
+  transition: all 0.15s; letter-spacing: 0.3px;
+}
+.model-chip:hover { color: var(--cyan); border-color: var(--cyan-border); }
+
+/* ── Debug ────────────────────────────────────────────────────── */
+.debug-buttons {
+  display: flex; gap: 8px; margin-bottom: 8px;
+}
+.debug-out {
+  font-family: var(--mono); font-size: 9px;
+  color: var(--cyan);
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(0,212,255,0.1);
+  border-radius: 6px; padding: 10px;
+  white-space: pre-wrap; word-break: break-all;
+  max-height: 200px; overflow-y: auto;
+  min-height: 40px; line-height: 1.6;
+}
+
+/* ── System info grid ─────────────────────────────────────────── */
+.info-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+}
+.info-card {
+  padding: 14px; border-radius: 10px;
+  background: rgba(0,212,255,0.04);
+  border: 1px solid rgba(0,212,255,0.1);
+}
+.info-label {
+  font-family: var(--mono); font-size: 8px;
+  letter-spacing: 2px; color: var(--text-faint);
+  margin-bottom: 5px; text-transform: uppercase;
+}
+.info-value {
+  font-family: var(--sans); font-size: 13px;
+  font-weight: 600; color: var(--text);
+  word-break: break-all;
+}
+
+/* ── Windows settings buttons ─────────────────────────────────── */
+.win-settings-btns {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}

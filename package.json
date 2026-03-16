@@ -1,0 +1,61 @@
+{
+  "name": "aria-assistant",
+  "version": "3.1.0",
+  "description": "ARIA - AI Desktop Assistant powered by Ollama / Claude",
+  "main": "main.js",
+  "scripts": {
+    "dev":      "vite",
+    "build":    "vite build",
+    "start":    "npm run build && electron .",
+    "electron": "electron .",
+    "dist":     "npm run build && electron-builder --win --x64",
+    "pack":     "npm run build && electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.aria.assistant",
+    "productName": "ARIA Assistant",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "main.js",
+      "preload.js",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "ARIA-Assistant-Setup-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "ARIA-Assistant-Portable-${version}.exe"
+    }
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "vite": "^5.4.2"
+  }
+}

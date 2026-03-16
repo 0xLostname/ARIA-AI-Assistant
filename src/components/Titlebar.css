@@ -1,0 +1,78 @@
+#titlebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  height: 46px;
+  flex-shrink: 0;
+  background: rgba(5,8,16,0.95);
+  border-bottom: 1px solid rgba(0,212,255,0.12);
+  -webkit-app-region: drag;
+  position: relative;
+  z-index: 100;
+  user-select: none;
+}
+
+.titlebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 3px;
+  color: var(--cyan);
+  transition: color 0.3s, text-shadow 0.3s;
+}
+.titlebar-logo.flash {
+  color: var(--cyan);
+  text-shadow: 0 0 12px var(--cyan);
+}
+
+.titlebar-logo .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.titlebar-status {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  color: var(--text-faint);
+}
+
+.titlebar-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  -webkit-app-region: no-drag;
+}
+
+.win-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.04);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  transition: all 0.15s;
+  font-family: var(--mono);
+}
+.win-btn:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+.win-btn.close:hover {
+  background: rgba(255,68,102,0.3);
+  border-color: rgba(255,68,102,0.5);
+  color: var(--red);
+}
