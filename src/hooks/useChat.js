@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
+import { matchPattern } from './usePatternMatcher.js';
 
 // ── Markdown-lite formatter (safe HTML) ──────────────────────────
 export function fmt(text) {
@@ -34,14 +35,14 @@ function buildPrompt(sysInfo) {
 Reply: one sentence + JSON action block.
 Example: Opening Chrome.\n\`\`\`json\n{"action":"launch_app","name":"chrome"}\n\`\`\`
 
-Actions: launch_app(name) web_search(query,engine) open_url(url) open_file(path) open_folder(path) list_files(path) search_files(query,dir) create_file(path,content) create_folder(path) rename(path,newName) delete(path) screenshot clipboard_write(text) clipboard_read sys_info open_settings(setting) run_cmd(command)
+Actions: launch_app(name) web_search(query,engine) open_url(url) open_file(path) open_folder(path) list_files(path) search_files(query,dir) create_file(path,content) create_folder(path) rename(path,newName) delete(path) screenshot clipboard_write(text) clipboard_read sys_info open_settings(setting) run_cmd(command) none
 
 App names: chrome firefox edge notepad calculator vlc spotify discord zoom vscode word excel cmd powershell explorer
 Engines: google youtube bing
 
-Vague\u2192action: bored/watch\u2192web_search youtube | music\u2192launch spotify | write\u2192launch notepad | files\u2192list_files "${D}" | code\u2192launch vscode | chat\u2192launch discord | call\u2192launch zoom | screenshot\u2192screenshot | stats\u2192sys_info
+Vague\u2192action: bored/watch\u2192web_search youtube | music\u2192launch spotify | write\u2192launch notepad | code\u2192launch vscode | chat\u2192launch discord | call\u2192launch zoom | screenshot\u2192screenshot | stats\u2192sys_info
 
-Rules: always output JSON block. Use full paths. One sentence only.`;
+Rules: always output JSON block. Use full paths. One sentence only. If unsure what the user wants, use {"action":"none"} — never guess with list_files or open_folder.`;
 }
 
 // ── Message shape ────────────────────────────────────────────────
@@ -202,6 +203,18 @@ export function useChat({
       return;
     }
 
+    // ── Pattern match → no AI needed ──────────────────────────
+    const patternHit = matchPattern(text, sysInfo);
+    if (patternHit) {
+      addUserMsg(text);
+      setIsLoading(true);
+      const result = await runAction(patternHit);
+      setIsLoading(false);
+      addAiMsg(describePatternAction(patternHit), result, '\u26a1 pattern');
+      if (result?.ok === true) await memorySave(text, patternHit);
+      return;
+    }
+
     // ── Fuzzy match → show confirm bar ─────────────────────────
     const fuzzyHit = memoryFuzzyMatch(text);
     if (fuzzyHit) {
@@ -278,4 +291,20 @@ export function useChat({
     fuzzyConfirmRun, fuzzyConfirmAsk,
     setFuzzyPending,
   };
+}
+
+// ── Human-readable label for a pattern-matched action ────────────────
+function describePatternAction(action) {
+  switch (action.action) {
+    case 'launch_app':    return `Opening **${action.name}**`;
+    case 'web_search':    return `Searching ${action.engine || 'Google'} for **${action.query}**`;
+    case 'open_url':      return `Opening **${action.url}**`;
+    case 'open_folder':   return `Opening **${action.path}**`;
+    case 'screenshot':    return `Taking a screenshot`;
+    case 'clipboard_read':  return `Reading clipboard`;
+    case 'clipboard_write': return `Copied to clipboard`;
+    case 'sys_info':      return `Fetching system info`;
+    case 'open_settings': return `Opening **${action.setting}** settings`;
+    default:              return `Running command`;
+  }
 }

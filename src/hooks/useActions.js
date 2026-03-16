@@ -7,6 +7,9 @@ export function useActions({ onFilesNavigate, onSysInfoUpdate } = {}) {
     if (!action?.action) return null;
     try {
       switch (action.action) {
+        case 'none':
+          return { ok: true, message: '' };
+
         case 'launch_app':
           return await window.aria.appLaunch(action.name);
 
@@ -136,7 +139,9 @@ export function useActions({ onFilesNavigate, onSysInfoUpdate } = {}) {
 
     const result = await runAction(action);
 
-    if (result?.ok !== false && originalPhrase) {
+    // Only save to memory on confirmed success — not on null, undefined, or
+    // { ok: false } results, so failed commands never replay as instant hits.
+    if (result?.ok === true && originalPhrase) {
       await onMemorySave?.(originalPhrase, action);
     }
 
