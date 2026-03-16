@@ -75,7 +75,8 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('will-quit', () => globalShortcut.unregisterAll());
+app.on('before-quit',       () => globalShortcut.unregisterAll());
+app.on('will-quit',         () => globalShortcut.unregisterAll());
 
 // ─── IPC Handlers ────────────────────────────────────────────────────
 
@@ -545,6 +546,7 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
   const payload = {
     model: modelName,
     stream: true,
+    keep_alive: -1,  // never unload the model from memory
     messages: [{ role: 'system', content: systemPrompt }, ...messages],
     options: { temperature: 0.1, num_predict: 150 }  // 150 tokens = 1 sentence + JSON block
   };
@@ -648,6 +650,56 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
     req.write(bodyStr);
     req.end();
   });
+});
+
+// ─── OLLAMA KEEP-WARM ─────────────────────────────────────────────────
+// Sends a silent zero-token request every 4 minutes to prevent Ollama from
+// unloading the model. Uses /api/generate with num_predict:0 — no output,
+// just enough to pin the model in memory. The interval is well under
+// Ollama's default 5-minute idle-unload window.
+
+let _keepWarmInterval = null;
+
+function sendKeepWarm(model, host) {
+  return new Promise((resolve) => {
+    const baseUrl = (host || 'http://localhost:11434').replace(/\/$/, '');
+    let parsedUrl;
+    try { parsedUrl = new URL(`${baseUrl}/api/generate`); }
+    catch (_) { return resolve(); }
+
+    const lib  = parsedUrl.protocol === 'https:' ? https : http;
+    const port = parsedUrl.port ? parseInt(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80);
+    const body = JSON.stringify({ model, prompt: '', keep_alive: -1, options: { num_predict: 0 } });
+
+    const req = lib.request({
+      hostname: parsedUrl.hostname, port,
+      path: '/api/generate', method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 30000,  // model load can take up to 20s on first launch
+    }, (res) => { res.resume(); res.on('end', resolve); });
+
+    req.on('error',   () => resolve());  // best-effort — never block the UI
+    req.on('timeout', () => { req.destroy(); resolve(); });
+    req.write(body);
+    req.end();
+    console.log(`[ARIA] keep-warm ping → ${baseUrl} model=${model}`);
+  });
+}
+
+// handle (not on) so the renderer can await the first ping completing —
+// that's the signal the model is loaded and the UI can unlock.
+ipcMain.handle('ollama-keep-warm-start', async (_, model, host) => {
+  if (_keepWarmInterval) clearInterval(_keepWarmInterval);
+  if (!model) return { ok: false };
+  await sendKeepWarm(model, host);                        // await first ping before resolving
+  _keepWarmInterval = setInterval(() => sendKeepWarm(model, host), 4 * 60 * 1000);
+  console.log(`[ARIA] keep-warm started for ${model}`);
+  return { ok: true };
+});
+
+ipcMain.on('ollama-keep-warm-stop', () => {
+  if (_keepWarmInterval) { clearInterval(_keepWarmInterval); _keepWarmInterval = null; }
+  console.log('[ARIA] keep-warm stopped');
 });
 
 // ─── CLAUDE AI PROXY ─────────────────────────────────────────────────

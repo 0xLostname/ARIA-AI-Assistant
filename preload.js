@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld('aria', {
   ollamaStatus: (host) => ipcRenderer.invoke('ollama-status', host),
   ollamaPull: (model, host) => ipcRenderer.invoke('ollama-pull', model, host),
   ollamaChat: (model, messages, systemPrompt, host) => ipcRenderer.invoke('ollama-chat', model, messages, systemPrompt, host),
+  ollamaKeepWarmStart: (model, host) => ipcRenderer.invoke('ollama-keep-warm-start', model, host),
+  ollamaKeepWarmStop:  ()            => ipcRenderer.send('ollama-keep-warm-stop'),
   onStreamToken: (cb) => ipcRenderer.on('aria-stream-token', (_, t) => cb(t)),
   onStreamDone:  (cb) => ipcRenderer.on('aria-stream-done',  (_, f) => cb(f)),
   onStreamError: (cb) => ipcRenderer.on('aria-stream-error', (_, e) => cb(e)),

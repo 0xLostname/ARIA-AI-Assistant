@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 
 // ── Markdown-lite formatter (safe HTML) ──────────────────────────
 export function fmt(text) {
@@ -39,7 +39,7 @@ Actions: launch_app(name) web_search(query,engine) open_url(url) open_file(path)
 App names: chrome firefox edge notepad calculator vlc spotify discord zoom vscode word excel cmd powershell explorer
 Engines: google youtube bing
 
-Vague→action: bored/watch→web_search youtube | music→launch spotify | write→launch notepad | files→list_files "${D}" | code→launch vscode | chat→launch discord | call→launch zoom | screenshot→screenshot | stats→sys_info
+Vague\u2192action: bored/watch\u2192web_search youtube | music\u2192launch spotify | write\u2192launch notepad | files\u2192list_files "${D}" | code\u2192launch vscode | chat\u2192launch discord | call\u2192launch zoom | screenshot\u2192screenshot | stats\u2192sys_info
 
 Rules: always output JSON block. Use full paths. One sentence only.`;
 }
@@ -68,6 +68,11 @@ export function useChat({
   const [isLoading,    setIsLoading]    = useState(false);
   const [fuzzyPending, setFuzzyPending] = useState(null);
 
+  // Bug fix #2: request ID ref guards listener races on fast double-send.
+  // Each stream invocation stamps its own reqId; all listeners bail out on
+  // mismatch so a stale stream can't corrupt the incoming one.
+  const activeReqId = useRef(0);
+
   // ── Welcome message ───────────────────────────────────────────
   const showWelcome = useCallback((model) => {
     const u = sysInfo?.username;
@@ -89,6 +94,95 @@ export function useChat({
   const updateStreamMsg = useCallback((id, patch) =>
     setMessages(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m)), []);
 
+  // ── Shared Ollama stream runner ───────────────────────────────
+  // Bug fix #1: extracted as a proper useCallback with complete deps so
+  // sendMessage (and fuzzyConfirmAsk) always call the current version.
+  // Previously these were separate callbacks missing from sendMessage's
+  // dep array, causing sendMessage to hold stale closures after re-renders.
+  const _runOllamaStream = useCallback(async (originalText, ctx, prompt) => {
+    const reqId   = ++activeReqId.current;
+    const msgId   = nextId();
+    const startMs = Date.now();
+    let accumulated = '';
+    let done        = false;
+
+    window.aria.removeStreamListeners();
+
+    setMessages(prev => [...prev, {
+      id: msgId, role: 'ai', text: '', isStreaming: true, model: ollamaModel, timestamp: nowStr(),
+    }]);
+
+    window.aria.onStreamPing(() => {
+      if (done || activeReqId.current !== reqId) return;
+      updateStreamMsg(msgId, { elapsed: ((Date.now() - startMs) / 1000).toFixed(1) });
+    });
+
+    window.aria.onStreamToken((token) => {
+      if (done || activeReqId.current !== reqId) return;
+      accumulated += token;
+      const visible = accumulated
+        .replace(/```json[\s\S]*?```/g, '')
+        .replace(/```json[\s\S]*$/,     '')
+        .replace(/^\s*`+\s*$/gm,        '')
+        .trim();
+      updateStreamMsg(msgId, { text: visible, isStreaming: true });
+    });
+
+    window.aria.onStreamDone(async (fullText) => {
+      if (done || activeReqId.current !== reqId) return;
+      done = true;
+      window.aria.removeStreamListeners();
+      setIsLoading(false);
+
+      const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+      const display = stripJson(fullText);
+      const result  = await parseAndRun(fullText, originalText, memorySave);
+
+      updateStreamMsg(msgId, {
+        text: display || '\u2713',
+        isStreaming: false,
+        result,
+        model: ollamaModel,
+        elapsed,
+      });
+
+      pushHistory('assistant', fullText);
+    });
+
+    window.aria.onStreamError((err) => {
+      if (done || activeReqId.current !== reqId) return;
+      done = true;
+      window.aria.removeStreamListeners();
+      setIsLoading(false);
+      updateStreamMsg(msgId, { text: `\u26a0\ufe0f ${err}`, isStreaming: false });
+    });
+
+    const r = await window.aria.ollamaChat(ollamaModel, ctx, prompt, ollamaHost);
+    if (!done && activeReqId.current === reqId && !r.ok) {
+      done = true;
+      window.aria.removeStreamListeners();
+      setIsLoading(false);
+      updateStreamMsg(msgId, { text: `\u26a0\ufe0f ${r.error}`, isStreaming: false });
+    }
+  }, [ollamaModel, ollamaHost, parseAndRun, memorySave, updateStreamMsg, pushHistory]);
+
+  // ── Shared Claude request runner ──────────────────────────────
+  const _runClaudeRequest = useCallback(async (originalText, ctx, prompt) => {
+    try {
+      const r = await window.aria.aiMessage(claudeApiKey, ctx, prompt);
+      setIsLoading(false);
+      if (!r.ok) { addAiMsg(`\u26a0\ufe0f ${r.error}`, null, 'Claude'); return; }
+      const raw     = (r.content || []).map(c => c.text || '').join('');
+      const display = stripJson(raw);
+      const result  = await parseAndRun(raw, originalText, memorySave);
+      addAiMsg(display || '\u2713', result, 'Claude');
+      pushHistory('assistant', raw);
+    } catch(e) {
+      setIsLoading(false);
+      addAiMsg(`\u26a0\ufe0f ${e.message}`, null, 'Claude');
+    }
+  }, [claudeApiKey, parseAndRun, memorySave, addAiMsg, pushHistory]);
+
   // ── Core send logic ───────────────────────────────────────────
   const sendMessage = useCallback(async (text) => {
     text = text.trim();
@@ -104,8 +198,11 @@ export function useChat({
       setIsLoading(true);
       const result = await runAction(exactHit.action);
       setIsLoading(false);
-      addAiMsg(`Running **${exactHit.phrase}**`, result, '⚡ instant');
-      await memorySave(exactHit.phrase, exactHit.action);
+      addAiMsg(`Running **${exactHit.phrase}**`, result, '\u26a1 instant');
+      // Bug fix #3: only reinforce memory when the action actually succeeded.
+      // Previously memorySave was called unconditionally, so failed actions
+      // (e.g. file not found, app not installed) would keep replaying instantly.
+      if (result?.ok === true) await memorySave(exactHit.phrase, exactHit.action);
       return;
     }
 
@@ -119,7 +216,7 @@ export function useChat({
     }
 
     if (!useOllama && !useClaude) {
-      showToast('No AI connected — open Settings', 'error');
+      showToast('No AI connected \u2014 open Settings', 'error');
       return;
     }
 
@@ -127,109 +224,20 @@ export function useChat({
     pushHistory('user', text);
     setIsLoading(true);
 
-    const prompt  = buildPrompt(sysInfo);
-    const ctx     = history.slice(-6);
+    const prompt = buildPrompt(sysInfo);
+    const ctx    = history.slice(-6);
 
-    if (useOllama) {
-      await _streamOllama(text, ctx, prompt);
-    } else {
-      await _claudeRequest(text, ctx, prompt);
-    }
+    if (useOllama) await _runOllamaStream(text, ctx, prompt);
+    else           await _runClaudeRequest(text, ctx, prompt);
   }, [
     isLoading, ollamaRunning, ollamaModel, ollamaHost,
     claudeApiKey, aiMode, sysInfo, history,
     memoryExactMatch, memoryFuzzyMatch, memorySave,
     addUserMsg, addAiMsg, pushHistory, runAction, showToast,
+    _runOllamaStream, _runClaudeRequest,
   ]);
 
-  // ── Ollama streaming ──────────────────────────────────────────
-  const _streamOllama = useCallback(async (originalText, ctx, prompt) => {
-    // Clean any previous listeners
-    window.aria.removeStreamListeners();
-
-    const msgId    = nextId();
-    const startMs  = Date.now();
-    let accumulated = '';
-    let done        = false;
-
-    // Insert streaming placeholder
-    setMessages(prev => [...prev, {
-      id: msgId, role: 'ai', text: '', isStreaming: true, model: ollamaModel, timestamp: nowStr(),
-    }]);
-
-    window.aria.onStreamPing(() => {
-      if (done) return;
-      const s = ((Date.now() - startMs) / 1000).toFixed(1);
-      updateStreamMsg(msgId, { elapsed: s });
-    });
-
-    window.aria.onStreamToken((token) => {
-      if (done) return;
-      accumulated += token;
-      const visible = accumulated
-        .replace(/```json[\s\S]*?```/g, '')
-        .replace(/```json[\s\S]*$/, '')
-        .replace(/^\s*`+\s*$/gm, '')
-        .trim();
-      updateStreamMsg(msgId, { text: visible, isStreaming: true });
-    });
-
-    window.aria.onStreamDone(async (fullText) => {
-      if (done) return;
-      done = true;
-      window.aria.removeStreamListeners();
-      setIsLoading(false);
-
-      const elapsed  = ((Date.now() - startMs) / 1000).toFixed(1);
-      const display  = stripJson(fullText);
-      const result   = await parseAndRun(fullText, originalText, memorySave);
-
-      updateStreamMsg(msgId, {
-        text: display || '✓',
-        isStreaming: false,
-        result,
-        model: ollamaModel,
-        elapsed,
-      });
-
-      pushHistory('assistant', fullText);
-    });
-
-    window.aria.onStreamError((err) => {
-      if (done) return;
-      done = true;
-      window.aria.removeStreamListeners();
-      setIsLoading(false);
-      updateStreamMsg(msgId, { text: `⚠️ ${err}`, isStreaming: false });
-    });
-
-    const r = await window.aria.ollamaChat(ollamaModel, ctx, prompt, ollamaHost);
-    if (!done && !r.ok) {
-      done = true;
-      window.aria.removeStreamListeners();
-      setIsLoading(false);
-      updateStreamMsg(msgId, { text: `⚠️ ${r.error}`, isStreaming: false });
-    }
-  }, [ollamaModel, ollamaHost, parseAndRun, memorySave, updateStreamMsg, pushHistory]);
-
-  // ── Claude non-streaming ──────────────────────────────────────
-  const _claudeRequest = useCallback(async (originalText, ctx, prompt) => {
-    try {
-      const r = await window.aria.aiMessage(claudeApiKey, ctx, prompt);
-      setIsLoading(false);
-      if (!r.ok) { addAiMsg(`⚠️ ${r.error}`, null, 'Claude'); return; }
-      const raw     = (r.content || []).map(c => c.text || '').join('');
-      const display = stripJson(raw);
-      const result  = await parseAndRun(raw, originalText, memorySave);
-      addAiMsg(display || '✓', result, 'Claude');
-      pushHistory('assistant', raw);
-    } catch(e) {
-      setIsLoading(false);
-      addAiMsg(`⚠️ ${e.message}`, null, 'Claude');
-    }
-  }, [claudeApiKey, parseAndRun, memorySave, addAiMsg, pushHistory]);
-
-  // ── Fuzzy confirm actions ─────────────────────────────────────
+  // ── Fuzzy confirm: run remembered action ──────────────────────
   const fuzzyConfirmRun = useCallback(async () => {
     if (!fuzzyPending) return;
     const { entry } = fuzzyPending;
@@ -238,10 +246,12 @@ export function useChat({
     setIsLoading(true);
     const result = await runAction(entry.action);
     setIsLoading(false);
-    addAiMsg(`Running **${entry.phrase}**`, result, '⚡ memory');
-    await memorySave(entry.phrase, entry.action);
+    addAiMsg(`Running **${entry.phrase}**`, result, '\u26a1 memory');
+    // Bug fix #3: same guard as exact-match path.
+    if (result?.ok === true) await memorySave(entry.phrase, entry.action);
   }, [fuzzyPending, runAction, addAiMsg, memorySave]);
 
+  // ── Fuzzy confirm: ask AI instead ────────────────────────────
   const fuzzyConfirmAsk = useCallback(async () => {
     if (!fuzzyPending) return;
     const { originalText } = fuzzyPending;
@@ -255,11 +265,11 @@ export function useChat({
     setIsLoading(true);
     const prompt = buildPrompt(sysInfo);
     const ctx    = history.slice(-6);
-    if (useOllama) await _streamOllama(originalText, ctx, prompt);
-    else           await _claudeRequest(originalText, ctx, prompt);
+    if (useOllama) await _runOllamaStream(originalText, ctx, prompt);
+    else           await _runClaudeRequest(originalText, ctx, prompt);
   }, [
     fuzzyPending, ollamaRunning, ollamaModel, claudeApiKey,
-    aiMode, sysInfo, history, _streamOllama, _claudeRequest, showToast,
+    aiMode, sysInfo, history, _runOllamaStream, _runClaudeRequest, showToast,
   ]);
 
   const clearMessages = useCallback(() => {
