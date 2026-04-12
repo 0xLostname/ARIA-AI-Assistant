@@ -68,7 +68,6 @@ function TypingIndicator() {
 // ── Main ChatPanel ───────────────────────────────────────────────
 export default function ChatPanel({
   messages, isLoading,
-  isWarmingUp,
   fuzzyPending, onFuzzyRun, onFuzzyAsk,
   onSendMessage,
   autocompleteMatches,
@@ -114,7 +113,7 @@ export default function ChatPanel({
   }, [autocompleteMatches]);
 
   const handleSend = useCallback(() => {
-    if (!input.trim() || isLoading || isWarmingUp) return;
+    if (!input.trim() || isLoading) return;
     const text = input;
     setInput('');
     setShowAc(false);
@@ -286,14 +285,6 @@ export default function ChatPanel({
           </div>
         )}
 
-        {/* Warming up banner */}
-        {isWarmingUp && (
-          <div className="warming-banner">
-            <span className="warming-spinner" />
-            Loading model into memory — first response will be instant…
-          </div>
-        )}
-
         {/* Text input */}
         <div className="input-wrapper">
           <textarea
@@ -303,22 +294,21 @@ export default function ChatPanel({
             value={input}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            placeholder={isWarmingUp ? 'Loading model…' : "Say anything — 'open Chrome', 'show my downloads', 'I'm bored'…"}
-            disabled={isWarmingUp}
+            placeholder="Say anything — 'open Chrome', 'show my downloads', 'I'm bored'…"
           />
           <button
             id="mic-btn"
             className={voiceActive ? 'mic-active' : ''}
             onClick={toggleVoice}
             title={micTitle}
-            disabled={isWarmingUp || micState === 'setting-up' || micState === 'transcribing'}
+            disabled={micState === 'setting-up' || micState === 'transcribing'}
           >
             {micIcon}
           </button>
           <button
             id="send-btn"
             onClick={handleSend}
-            disabled={isWarmingUp || isLoading || !input.trim()}
+            disabled={isLoading || !input.trim()}
           >
             ⚡
           </button>

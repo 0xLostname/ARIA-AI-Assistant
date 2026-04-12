@@ -1,5 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
-import { matchPattern } from './usePatternMatcher.js';
+import { useState, useCallback, useRef, useEffect } from 'react';
 
 // ── Markdown-lite formatter (safe HTML) ──────────────────────────
 export function fmt(text) {
@@ -27,22 +26,16 @@ function stripJson(text) {
 function buildPrompt(sysInfo) {
   const D = sysInfo?.desktop   || 'C:/Users/user/Desktop';
   const L = sysInfo?.downloads || 'C:/Users/user/Downloads';
-  const O = sysInfo?.documents || 'C:/Users/user/Documents';
   const U = sysInfo?.username  || 'user';
 
-  return `You are ARIA, a Windows assistant for ${U}. Desktop="${D}" Downloads="${L}" Documents="${O}"
-
-Reply: one sentence + JSON action block.
-Example: Opening Chrome.\n\`\`\`json\n{"action":"launch_app","name":"chrome"}\n\`\`\`
-
-Actions: launch_app(name) web_search(query,engine) open_url(url) open_file(path) open_folder(path) list_files(path) search_files(query,dir) create_file(path,content) create_folder(path) rename(path,newName) delete(path) screenshot clipboard_write(text) clipboard_read sys_info open_settings(setting) run_cmd(command) none
-
-App names: chrome firefox edge notepad calculator vlc spotify discord zoom vscode word excel cmd powershell explorer
-Engines: google youtube bing
-
-Vague\u2192action: bored/watch\u2192web_search youtube | music\u2192launch spotify | write\u2192launch notepad | code\u2192launch vscode | chat\u2192launch discord | call\u2192launch zoom | screenshot\u2192screenshot | stats\u2192sys_info
-
-Rules: always output JSON block. Use full paths. One sentence only. If unsure what the user wants, use {"action":"none"} — never guess with list_files or open_folder.`;
+  // Compact prompt — every token saved = faster first response
+  return `ARIA: Windows assistant for ${U}. Desktop="${D}" Downloads="${L}"
+Reply: one sentence + JSON.
+Example: Opening Chrome.\`\`\`json\n{"action":"launch_app","name":"chrome"}\`\`\`
+Actions: launch_app(name) web_search(query,engine) open_url(url) open_file(path) open_folder(path) list_files(path) search_files(query,dir) create_file(path,content) create_folder(path) rename(path,newName) delete(path) screenshot clipboard_write(text) clipboard_read sys_info open_settings(setting) run_cmd(command) kill_app(name)
+Apps: chrome firefox edge notepad calculator vlc spotify discord zoom vscode word excel cmd powershell explorer
+Vague: bored→web_search youtube | music→launch spotify | write→launch notepad | code→launch vscode | chat→launch discord | screenshot→screenshot | stats→sys_info
+Rule: always output JSON. One sentence only.`;
 }
 
 // ── Message shape ────────────────────────────────────────────────
@@ -65,13 +58,15 @@ export function useChat({
 }) {
 
   const [messages,     setMessages]     = useState([]);
+  const [history,      setHistory]      = useState([]);
   const [isLoading,    setIsLoading]    = useState(false);
   const [fuzzyPending, setFuzzyPending] = useState(null);
 
-  // Bug fix #2: request ID ref guards listener races on fast double-send.
-  // Each stream invocation stamps its own reqId; all listeners bail out on
-  // mismatch so a stale stream can't corrupt the incoming one.
-  const activeReqId = useRef(0);
+  // Cache the system prompt — rebuild only when sysInfo changes
+  const promptRef = useRef('');
+  useEffect(() => {
+    promptRef.current = buildPrompt(sysInfo);
+  }, [sysInfo]);
 
   // ── Welcome message ───────────────────────────────────────────
   const showWelcome = useCallback((model) => {
@@ -87,98 +82,12 @@ export function useChat({
   const addAiMsg = useCallback((text, result, model, elapsed) =>
     setMessages(prev => [...prev, { id: nextId(), role: 'ai', text, result, model, elapsed, timestamp: nowStr() }]), []);
 
+  const pushHistory = useCallback((role, content) =>
+    setHistory(prev => [...prev.slice(-10), { role, content }]), []);
+
   // ── Streaming bubble update ───────────────────────────────────
   const updateStreamMsg = useCallback((id, patch) =>
     setMessages(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m)), []);
-
-  // ── Shared Ollama stream runner ───────────────────────────────
-  // Bug fix #1: extracted as a proper useCallback with complete deps so
-  // sendMessage (and fuzzyConfirmAsk) always call the current version.
-  // Previously these were separate callbacks missing from sendMessage's
-  // dep array, causing sendMessage to hold stale closures after re-renders.
-  const _runOllamaStream = useCallback(async (originalText, ctx, prompt) => {
-    const reqId   = ++activeReqId.current;
-    const msgId   = nextId();
-    const startMs = Date.now();
-    let accumulated = '';
-    let done        = false;
-
-    window.aria.removeStreamListeners();
-
-    setMessages(prev => [...prev, {
-      id: msgId, role: 'ai', text: '', isStreaming: true, model: ollamaModel, timestamp: nowStr(),
-    }]);
-
-    window.aria.onStreamPing(() => {
-      if (done || activeReqId.current !== reqId) return;
-      updateStreamMsg(msgId, { elapsed: ((Date.now() - startMs) / 1000).toFixed(1) });
-    });
-
-    window.aria.onStreamToken((token) => {
-      if (done || activeReqId.current !== reqId) return;
-      accumulated += token;
-      const visible = accumulated
-        .replace(/```json[\s\S]*?```/g, '')
-        .replace(/```json[\s\S]*$/,     '')
-        .replace(/^\s*`+\s*$/gm,        '')
-        .trim();
-      updateStreamMsg(msgId, { text: visible, isStreaming: true });
-    });
-
-    window.aria.onStreamDone(async (fullText) => {
-      if (done || activeReqId.current !== reqId) return;
-      done = true;
-      window.aria.removeStreamListeners();
-      setIsLoading(false);
-
-      const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
-      const display = stripJson(fullText);
-      const result  = await parseAndRun(fullText, originalText, memorySave);
-
-      updateStreamMsg(msgId, {
-        text: display || '\u2713',
-        isStreaming: false,
-        result,
-        model: ollamaModel,
-        elapsed,
-      });
-
-      
-    });
-
-    window.aria.onStreamError((err) => {
-      if (done || activeReqId.current !== reqId) return;
-      done = true;
-      window.aria.removeStreamListeners();
-      setIsLoading(false);
-      updateStreamMsg(msgId, { text: `\u26a0\ufe0f ${err}`, isStreaming: false });
-    });
-
-    const r = await window.aria.ollamaChat(ollamaModel, ctx, prompt, ollamaHost);
-    if (!done && activeReqId.current === reqId && !r.ok) {
-      done = true;
-      window.aria.removeStreamListeners();
-      setIsLoading(false);
-      updateStreamMsg(msgId, { text: `\u26a0\ufe0f ${r.error}`, isStreaming: false });
-    }
-  }, [ollamaModel, ollamaHost, parseAndRun, memorySave, updateStreamMsg]);
-
-  // ── Shared Claude request runner ──────────────────────────────
-  const _runClaudeRequest = useCallback(async (originalText, ctx, prompt) => {
-    try {
-      const r = await window.aria.aiMessage(claudeApiKey, ctx, prompt);
-      setIsLoading(false);
-      if (!r.ok) { addAiMsg(`\u26a0\ufe0f ${r.error}`, null, 'Claude'); return; }
-      const raw     = (r.content || []).map(c => c.text || '').join('');
-      const display = stripJson(raw);
-      const result  = await parseAndRun(raw, originalText, memorySave);
-      addAiMsg(display || '\u2713', result, 'Claude');
-      
-    } catch(e) {
-      setIsLoading(false);
-      addAiMsg(`\u26a0\ufe0f ${e.message}`, null, 'Claude');
-    }
-  }, [claudeApiKey, parseAndRun, memorySave, addAiMsg]);
 
   // ── Core send logic ───────────────────────────────────────────
   const sendMessage = useCallback(async (text) => {
@@ -195,23 +104,8 @@ export function useChat({
       setIsLoading(true);
       const result = await runAction(exactHit.action);
       setIsLoading(false);
-      addAiMsg(`Running **${exactHit.phrase}**`, result, '\u26a1 instant');
-      // Bug fix #3: only reinforce memory when the action actually succeeded.
-      // Previously memorySave was called unconditionally, so failed actions
-      // (e.g. file not found, app not installed) would keep replaying instantly.
-      if (result?.ok === true) await memorySave(exactHit.phrase, exactHit.action);
-      return;
-    }
-
-    // ── Pattern match → no AI needed ──────────────────────────
-    const patternHit = matchPattern(text, sysInfo);
-    if (patternHit) {
-      addUserMsg(text);
-      setIsLoading(true);
-      const result = await runAction(patternHit);
-      setIsLoading(false);
-      addAiMsg(describePatternAction(patternHit), result, '\u26a1 pattern');
-      if (result?.ok === true) await memorySave(text, patternHit);
+      addAiMsg(`Running **${exactHit.phrase}**`, result, '⚡ instant');
+      await memorySave(exactHit.phrase, exactHit.action);
       return;
     }
 
@@ -219,34 +113,139 @@ export function useChat({
     const fuzzyHit = memoryFuzzyMatch(text);
     if (fuzzyHit) {
       addUserMsg(text);
-      
+      pushHistory('user', text);
       setFuzzyPending({ entry: fuzzyHit, originalText: text });
       return;
     }
 
     if (!useOllama && !useClaude) {
-      showToast('No AI connected \u2014 open Settings', 'error');
+      showToast('No AI connected — open Settings', 'error');
       return;
     }
 
     addUserMsg(text);
-    
+    pushHistory('user', text);
     setIsLoading(true);
 
-    const prompt = buildPrompt(sysInfo);
-    
+    const prompt = promptRef.current || buildPrompt(sysInfo);
+    const ctx    = history.slice(-3);
 
-    if (useOllama) await _runOllamaStream(text, [], prompt);
-    else           await _runClaudeRequest(text, [], prompt);
+    if (useOllama) {
+      await _streamOllama(text, ctx, prompt);
+    } else {
+      await _claudeRequest(text, ctx, prompt);
+    }
   }, [
     isLoading, ollamaRunning, ollamaModel, ollamaHost,
-    claudeApiKey, aiMode, sysInfo,
+    claudeApiKey, aiMode, history,
     memoryExactMatch, memoryFuzzyMatch, memorySave,
-    addUserMsg, addAiMsg, runAction, showToast,
-    _runOllamaStream, _runClaudeRequest,
+    addUserMsg, addAiMsg, pushHistory, runAction, showToast,
   ]);
 
-  // ── Fuzzy confirm: run remembered action ──────────────────────
+  // ── Ollama streaming ──────────────────────────────────────────
+  const _streamOllama = useCallback(async (originalText, ctx, prompt) => {
+    window.aria.removeStreamListeners();
+
+    const msgId   = nextId();
+    const startMs = Date.now();
+    let accumulated  = '';
+    let done         = false;
+
+    // Batching: buffer tokens and flush every 30ms to avoid per-token re-renders
+    let pendingText  = '';
+    let flushTimer   = null;
+    const flushNow = () => {
+      if (!pendingText || done) return;
+      const snap = pendingText;
+      pendingText = '';
+      const visible = snap
+        .replace(/```json[\s\S]*?```/g, '')
+        .replace(/```json[\s\S]*$/, '')
+        .replace(/^\s*`+\s*$/gm, '')
+        .trim();
+      updateStreamMsg(msgId, { text: visible, isStreaming: true });
+    };
+
+    setMessages(prev => [...prev, {
+      id: msgId, role: 'ai', text: '', isStreaming: true,
+      model: ollamaModel, timestamp: nowStr(),
+    }]);
+
+    // Client-side elapsed timer — 1s tick, no IPC needed
+    const elapsedTimer = setInterval(() => {
+      if (done) { clearInterval(elapsedTimer); return; }
+      updateStreamMsg(msgId, { elapsed: ((Date.now() - startMs) / 1000).toFixed(1) });
+    }, 1000);
+
+    window.aria.onStreamToken((token) => {
+      if (done) return;
+      accumulated += token;
+      pendingText  = accumulated; // always flush the full accumulated visible text
+      clearTimeout(flushTimer);
+      flushTimer = setTimeout(flushNow, 30);
+    });
+
+    window.aria.onStreamDone(async (fullText) => {
+      if (done) return;
+      done = true;
+      clearTimeout(flushTimer);
+      clearInterval(elapsedTimer);
+      window.aria.removeStreamListeners();
+      setIsLoading(false);
+
+      const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+      const display = stripJson(fullText);
+      const result  = await parseAndRun(fullText, originalText, memorySave);
+
+      updateStreamMsg(msgId, {
+        text: display || '✓',
+        isStreaming: false,
+        result,
+        model: ollamaModel,
+        elapsed,
+      });
+      pushHistory('assistant', fullText);
+    });
+
+    window.aria.onStreamError((err) => {
+      if (done) return;
+      done = true;
+      clearTimeout(flushTimer);
+      clearInterval(elapsedTimer);
+      window.aria.removeStreamListeners();
+      setIsLoading(false);
+      updateStreamMsg(msgId, { text: `⚠️ ${err}`, isStreaming: false });
+    });
+
+    const r = await window.aria.ollamaChat(ollamaModel, ctx, prompt, ollamaHost);
+    if (!done && !r.ok) {
+      done = true;
+      clearTimeout(flushTimer);
+      clearInterval(elapsedTimer);
+      window.aria.removeStreamListeners();
+      setIsLoading(false);
+      updateStreamMsg(msgId, { text: `⚠️ ${r.error}`, isStreaming: false });
+    }
+  }, [ollamaModel, ollamaHost, parseAndRun, memorySave, updateStreamMsg, pushHistory]);
+
+  // ── Claude non-streaming ──────────────────────────────────────
+  const _claudeRequest = useCallback(async (originalText, ctx, prompt) => {
+    try {
+      const r = await window.aria.aiMessage(claudeApiKey, ctx, prompt);
+      setIsLoading(false);
+      if (!r.ok) { addAiMsg(`⚠️ ${r.error}`, null, 'Claude'); return; }
+      const raw     = (r.content || []).map(c => c.text || '').join('');
+      const display = stripJson(raw);
+      const result  = await parseAndRun(raw, originalText, memorySave);
+      addAiMsg(display || '✓', result, 'Claude');
+      pushHistory('assistant', raw);
+    } catch(e) {
+      setIsLoading(false);
+      addAiMsg(`⚠️ ${e.message}`, null, 'Claude');
+    }
+  }, [claudeApiKey, parseAndRun, memorySave, addAiMsg, pushHistory]);
+
+  // ── Fuzzy confirm actions ─────────────────────────────────────
   const fuzzyConfirmRun = useCallback(async () => {
     if (!fuzzyPending) return;
     const { entry } = fuzzyPending;
@@ -255,12 +254,10 @@ export function useChat({
     setIsLoading(true);
     const result = await runAction(entry.action);
     setIsLoading(false);
-    addAiMsg(`Running **${entry.phrase}**`, result, '\u26a1 memory');
-    // Bug fix #3: same guard as exact-match path.
-    if (result?.ok === true) await memorySave(entry.phrase, entry.action);
+    addAiMsg(`Running **${entry.phrase}**`, result, '⚡ memory');
+    await memorySave(entry.phrase, entry.action);
   }, [fuzzyPending, runAction, addAiMsg, memorySave]);
 
-  // ── Fuzzy confirm: ask AI instead ────────────────────────────
   const fuzzyConfirmAsk = useCallback(async () => {
     if (!fuzzyPending) return;
     const { originalText } = fuzzyPending;
@@ -272,17 +269,18 @@ export function useChat({
     if (!useOllama && !useClaude) { showToast('No AI connected', 'error'); return; }
 
     setIsLoading(true);
-    const prompt = buildPrompt(sysInfo);
-    
-    if (useOllama) await _runOllamaStream(originalText, [], prompt);
-    else           await _runClaudeRequest(originalText, [], prompt);
+    const prompt = promptRef.current || buildPrompt(sysInfo);
+    const ctx    = history.slice(-3);
+    if (useOllama) await _streamOllama(originalText, ctx, prompt);
+    else           await _claudeRequest(originalText, ctx, prompt);
   }, [
     fuzzyPending, ollamaRunning, ollamaModel, claudeApiKey,
-    aiMode, sysInfo, _runOllamaStream, _runClaudeRequest, showToast,
+    aiMode, history, _streamOllama, _claudeRequest, showToast,
   ]);
 
   const clearMessages = useCallback(() => {
     setMessages([]);
+    setHistory([]);
   }, []);
 
   return {
@@ -291,20 +289,4 @@ export function useChat({
     fuzzyConfirmRun, fuzzyConfirmAsk,
     setFuzzyPending,
   };
-}
-
-// ── Human-readable label for a pattern-matched action ────────────────
-function describePatternAction(action) {
-  switch (action.action) {
-    case 'launch_app':    return `Opening **${action.name}**`;
-    case 'web_search':    return `Searching ${action.engine || 'Google'} for **${action.query}**`;
-    case 'open_url':      return `Opening **${action.url}**`;
-    case 'open_folder':   return `Opening **${action.path}**`;
-    case 'screenshot':    return `Taking a screenshot`;
-    case 'clipboard_read':  return `Reading clipboard`;
-    case 'clipboard_write': return `Copied to clipboard`;
-    case 'sys_info':      return `Fetching system info`;
-    case 'open_settings': return `Opening **${action.setting}** settings`;
-    default:              return `Running command`;
-  }
 }

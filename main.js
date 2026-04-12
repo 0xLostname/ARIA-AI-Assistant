@@ -75,8 +75,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit',       () => globalShortcut.unregisterAll());
-app.on('will-quit',         () => globalShortcut.unregisterAll());
+app.on('will-quit', () => globalShortcut.unregisterAll());
 
 // ─── IPC Handlers ────────────────────────────────────────────────────
 
@@ -220,11 +219,10 @@ ipcMain.handle('fs-write', async (_, filePath, content) => {
 ipcMain.handle('app-launch', async (_, appName) => {
   try {
     const cmd = getLaunchCommand(appName);
-    console.log(`[ARIA] launch: ${cmd}`);
     exec(cmd, { shell: true }, (err) => {
       if (err) console.log('Launch note:', err.message);
     });
-    return { ok: true, message: `Launching ${appName}` };
+    return { ok: true, message: `Launching: ${appName}` };
   } catch (e) { return { ok: false, error: e.message }; }
 });
 
@@ -541,18 +539,54 @@ ipcMain.handle('ollama-pull', async (_, modelName, host) => {
   });
 });
 
+// ── Ollama pre-warm — loads model into VRAM silently, fire-and-forget ────────
+ipcMain.handle('ollama-prewarm', async (_, modelName, host) => {
+  if (!modelName) return { ok: false, error: 'No model specified' };
+  const baseUrl = (host || 'http://localhost:11434').replace(/\/$/, '');
+  const body = JSON.stringify({
+    model: modelName,
+    stream: false,
+    keep_alive: -1,
+    messages: [{ role: 'user', content: '.' }],
+    options: { num_predict: 1, temperature: 0 },
+  });
+  try {
+    const parsedUrl = new URL(`${baseUrl}/api/chat`);
+    const lib  = parsedUrl.protocol === 'https:' ? https : http;
+    const port = parsedUrl.port ? parseInt(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80);
+    await new Promise((resolve) => {
+      const req = lib.request({
+        hostname: parsedUrl.hostname, port,
+        path: '/api/chat', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        timeout: 60000,
+      }, (res) => {
+        res.resume(); // drain and discard — we only care that the model loaded
+        res.on('end', resolve);
+      });
+      req.on('error', resolve); // ignore errors — this is best-effort
+      req.on('timeout', () => { req.destroy(); resolve(); });
+      req.write(body);
+      req.end();
+    });
+    console.log(`[ARIA] pre-warmed ${modelName}`);
+    return { ok: true };
+  } catch(e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 // ── Ollama chat — streams tokens to renderer, resolves when done ──────────
 ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host) => {
   const baseUrl = (host || 'http://localhost:11434').replace(/\/$/, '');
   const payload = {
     model: modelName,
     stream: true,
-    keep_alive: -1,  // never unload the model from memory
+    keep_alive: -1,   // keep model loaded in VRAM permanently — eliminates cold-load delay
     messages: [{ role: 'system', content: systemPrompt }, ...messages],
-    options: { temperature: 0.1, num_predict: 150 }  // 150 tokens = 1 sentence + JSON block
+    options: { temperature: 0.1, num_predict: 80 }
   };
   const bodyStr = JSON.stringify(payload);
-  console.log(`[ARIA] stream → ${baseUrl} model=${modelName}`);
 
   return new Promise((resolve) => {
     let parsedUrl;
@@ -565,13 +599,12 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
     let fullText = '';
     let buffer   = '';
     let done     = false;
-    let hardTimer, pingTimer;
+    let hardTimer;
 
     function finish(err) {
       if (done) return;
       done = true;
       clearTimeout(hardTimer);
-      clearInterval(pingTimer);
       if (err) {
         console.error('[ARIA] stream error:', err);
         mainWindow?.webContents.send('aria-stream-error', String(err));
@@ -583,16 +616,10 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
       }
     }
 
-    // Hard wall-clock timeout
     hardTimer = setTimeout(() => {
       req.destroy();
       finish('No response after 45s — model may be loading, try again');
     }, 45000);
-
-    // Heartbeat ping so UI can show elapsed time
-    pingTimer = setInterval(() => {
-      if (!done) mainWindow?.webContents.send('aria-stream-ping');
-    }, 500);
 
     const req = lib.request({
       hostname: parsedUrl.hostname, port,
@@ -611,6 +638,7 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
         const lines = buffer.split('\n');
         buffer = lines.pop(); // last line may be incomplete
 
+        let batchedTokens = '';
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
@@ -620,9 +648,13 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
             const token = obj.message?.content || '';
             if (token && !done) {
               fullText += token;
-              mainWindow?.webContents.send('aria-stream-token', token);
+              batchedTokens += token;
             }
           } catch (_) { /* incomplete JSON — wait for next chunk */ }
+        }
+        // Send all tokens from this chunk in one IPC call instead of one per token
+        if (batchedTokens && !done) {
+          mainWindow?.webContents.send('aria-stream-token', batchedTokens);
         }
       });
 
@@ -652,58 +684,6 @@ ipcMain.handle('ollama-chat', async (_, modelName, messages, systemPrompt, host)
     req.end();
   });
 });
-
-// ─── OLLAMA KEEP-WARM ─────────────────────────────────────────────────
-// Sends a silent zero-token request every 4 minutes to prevent Ollama from
-// unloading the model. Uses /api/generate with num_predict:0 — no output,
-// just enough to pin the model in memory. The interval is well under
-// Ollama's default 5-minute idle-unload window.
-
-let _keepWarmInterval = null;
-
-function sendKeepWarm(model, host) {
-  return new Promise((resolve) => {
-    const baseUrl = (host || 'http://localhost:11434').replace(/\/$/, '');
-    let parsedUrl;
-    try { parsedUrl = new URL(`${baseUrl}/api/generate`); }
-    catch (_) { return resolve(); }
-
-    const lib  = parsedUrl.protocol === 'https:' ? https : http;
-    const port = parsedUrl.port ? parseInt(parsedUrl.port) : (parsedUrl.protocol === 'https:' ? 443 : 80);
-    const body = JSON.stringify({ model, prompt: '', keep_alive: -1, options: { num_predict: 0 } });
-
-    const req = lib.request({
-      hostname: parsedUrl.hostname, port,
-      path: '/api/generate', method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 30000,  // model load can take up to 20s on first launch
-    }, (res) => { res.resume(); res.on('end', resolve); });
-
-    req.on('error',   () => resolve());  // best-effort — never block the UI
-    req.on('timeout', () => { req.destroy(); resolve(); });
-    req.write(body);
-    req.end();
-    console.log(`[ARIA] keep-warm ping → ${baseUrl} model=${model}`);
-  });
-}
-
-// handle (not on) so the renderer can await the first ping completing —
-// that's the signal the model is loaded and the UI can unlock.
-ipcMain.handle('ollama-keep-warm-start', async (_, model, host) => {
-  if (_keepWarmInterval) clearInterval(_keepWarmInterval);
-  if (!model) return { ok: false };
-  await sendKeepWarm(model, host);                        // await first ping before resolving
-  _keepWarmInterval = setInterval(() => sendKeepWarm(model, host), 4 * 60 * 1000);
-  console.log(`[ARIA] keep-warm started for ${model}`);
-  return { ok: true };
-});
-
-ipcMain.on('ollama-keep-warm-stop', () => {
-  if (_keepWarmInterval) { clearInterval(_keepWarmInterval); _keepWarmInterval = null; }
-  console.log('[ARIA] keep-warm stopped');
-});
-
-// ─── CLAUDE AI PROXY ─────────────────────────────────────────────────
 
 ipcMain.handle('ai-message', async (_, apiKey, messages, systemPrompt) => {
   return new Promise((resolve) => {
@@ -791,192 +771,38 @@ function searchRecursive(dir, query, results, depth, maxDepth) {
   } catch (_) {}
 }
 
-// ── App name aliases (common shorthand → search term) ────────────────
-const APP_ALIASES = {
-  'chrome': 'google chrome',
-  'vscode': 'visual studio code',
-  'vs code': 'visual studio code',
-  'code': 'visual studio code',
-  'word': 'microsoft word',
-  'excel': 'microsoft excel',
-  'powerpoint': 'microsoft powerpoint',
-  'outlook': 'microsoft outlook',
-  'teams': 'microsoft teams',
-  'edge': 'microsoft edge',
-  'file explorer': 'explorer',
-  'files': 'explorer',
-  'terminal': 'windows terminal',
-  'wt': 'windows terminal',
-};
-
-// ── Built-in Windows commands that need special handling ─────────────
-const BUILTIN_COMMANDS = {
-  'explorer':      'explorer.exe',
-  'file explorer': 'explorer.exe',
-  'notepad':       'notepad.exe',
-  'calculator':    'calc.exe',
-  'calc':          'calc.exe',
-  'paint':         'mspaint.exe',
-  'mspaint':       'mspaint.exe',
-  'cmd':           'cmd.exe',
-  'powershell':    'powershell.exe',
-  'task manager':  'taskmgr.exe',
-  'taskmgr':       'taskmgr.exe',
-  'control panel': 'control.exe',
-  'control':       'control.exe',
-  'regedit':       'regedit.exe',
-  'snipping tool': 'SnippingTool.exe',
-};
-
-// ── Search the Windows registry for an installed app path ────────────
-function findAppInRegistry(name) {
-  const hives = [
-    'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths',
-    'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths',
-    'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths',
-  ];
-  for (const hive of hives) {
-    try {
-      const out = execSync(
-        `reg query "${hive}" /s /f "${name}" /k 2>nul`,
-        { encoding: 'utf8', timeout: 3000 }
-      );
-      // Extract any .exe path from the output
-      const match = out.match(/REG_SZ\s+([^\r\n]+\.exe)/i);
-      if (match) {
-        const exePath = match[1].trim().replace(/^"|"$/g, '');
-        if (fs.existsSync(exePath)) return exePath;
-      }
-      // Also try reading the default value of matching subkeys
-      const keyMatch = out.match(new RegExp(`${hive.replace(/\\/g, '\\\\')}\\\\([^\\r\\n]+)`, 'i'));
-      if (keyMatch) {
-        try {
-          const val = execSync(
-            `reg query "${hive}\\${keyMatch[1]}" /ve 2>nul`,
-            { encoding: 'utf8', timeout: 2000 }
-          );
-          const pathMatch = val.match(/REG_SZ\s+([^\r\n]+\.exe)/i);
-          if (pathMatch) {
-            const p = pathMatch[1].trim().replace(/^"|"$/g, '');
-            if (fs.existsSync(p)) return p;
-          }
-        } catch(_) {}
-      }
-    } catch(_) {}
-  }
-  return null;
-}
-
-// ── Search Start Menu .lnk shortcuts for an app name ────────────────
-function findAppInStartMenu(name) {
-  const dirs = [
-    path.join(process.env.APPDATA  || '', 'Microsoft\\Windows\\Start Menu\\Programs'),
-    path.join(process.env.ProgramData || 'C:\\ProgramData', 'Microsoft\\Windows\\Start Menu\\Programs'),
-  ];
-  const lower = name.toLowerCase();
-
-  for (const dir of dirs) {
-    if (!fs.existsSync(dir)) continue;
-    try {
-      // Use dir /s /b to get all .lnk files recursively
-      const out = execSync(`dir "${dir}" /s /b /a:-d 2>nul`, { encoding: 'utf8', timeout: 4000 });
-      const lines = out.split('\n').map(l => l.trim()).filter(l => l.endsWith('.lnk'));
-
-      // Score each shortcut by how well it matches
-      let best = null, bestScore = 0;
-      for (const lnk of lines) {
-        const lnkName = path.basename(lnk, '.lnk').toLowerCase();
-        let score = 0;
-        if (lnkName === lower)                score = 100;
-        else if (lnkName.startsWith(lower))   score = 80;
-        else if (lnkName.includes(lower))     score = 60;
-        else if (lower.includes(lnkName) && lnkName.length > 3) score = 40;
-        if (score > bestScore) { bestScore = score; best = lnk; }
-      }
-
-      if (best && bestScore >= 40) {
-        // Resolve the .lnk to its target exe using PowerShell
-        try {
-          const ps = `(New-Object -ComObject WScript.Shell).CreateShortcut('${best.replace(/'/g, "''")}').TargetPath`;
-          const target = execSync(
-            `powershell -NoProfile -Command "${ps}" 2>nul`,
-            { encoding: 'utf8', timeout: 3000 }
-          ).trim();
-          if (target && fs.existsSync(target)) return target;
-          // Some shortcuts point to folders or UWP apps — fall back to launching the .lnk directly
-          if (target) return `"${best}"`;
-        } catch(_) {
-          return `"${best}"`;  // launch the shortcut directly as fallback
-        }
-      }
-    } catch(_) {}
-  }
-  return null;
-}
-
-// ── Search common install directories for an exe matching the name ──
-function findAppInCommonDirs(name) {
-  const roots = [
-    process.env.ProgramFiles        || 'C:\\Program Files',
-    process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
-    process.env.LOCALAPPDATA        ? path.join(process.env.LOCALAPPDATA, 'Programs') : null,
-    process.env.APPDATA             ? path.join(process.env.APPDATA, 'Local\\Programs') : null,
-  ].filter(Boolean);
-
-  const lower = name.toLowerCase().replace(/\s+/g, '');
-
-  for (const root of roots) {
-    if (!fs.existsSync(root)) continue;
-    try {
-      const out = execSync(
-        `dir "${root}" /s /b /a:-d 2>nul | findstr /i ".exe$"`,
-        { encoding: 'utf8', timeout: 5000 }
-      );
-      const exes = out.split('\n').map(l => l.trim()).filter(Boolean);
-
-      let best = null, bestScore = 0;
-      for (const exe of exes) {
-        const exeName = path.basename(exe, '.exe').toLowerCase().replace(/\s+/g, '');
-        let score = 0;
-        if (exeName === lower)                score = 100;
-        else if (exeName.startsWith(lower))   score = 70;
-        else if (lower.startsWith(exeName) && exeName.length > 3) score = 60;
-        else if (exeName.includes(lower))     score = 50;
-        // Boost if parent folder name also matches
-        const folder = path.basename(path.dirname(exe)).toLowerCase().replace(/\s+/g, '');
-        if (folder.includes(lower) || lower.includes(folder)) score += 10;
-        if (score > bestScore) { bestScore = score; best = exe; }
-      }
-      if (best && bestScore >= 50) return best;
-    } catch(_) {}
-  }
-  return null;
-}
-
-// ── Master launcher — tries every strategy in order ─────────────────
 function getLaunchCommand(appName) {
-  const key   = appName.toLowerCase().trim();
-  const term  = APP_ALIASES[key] || key;
-  const termNorm = term.replace(/\s+/g, '');
-
-  // 1. Built-in Windows commands
-  if (BUILTIN_COMMANDS[key])   return `start "" "${BUILTIN_COMMANDS[key]}"`;
-  if (BUILTIN_COMMANDS[term])  return `start "" "${BUILTIN_COMMANDS[term]}"`;
-
-  // 2. Registry App Paths
-  const regPath = findAppInRegistry(term) || findAppInRegistry(termNorm);
-  if (regPath) return `start "" "${regPath}"`;
-
-  // 3. Start Menu shortcuts
-  const lnkPath = findAppInStartMenu(term);
-  if (lnkPath) return lnkPath.startsWith('"') ? `start "" ${lnkPath}` : `start "" "${lnkPath}"`;
-
-  // 4. Common install directories
-  const dirPath = findAppInCommonDirs(term) || findAppInCommonDirs(termNorm);
-  if (dirPath) return `start "" "${dirPath}"`;
-
-  // 5. Last resort — let Windows try to find it by name (works for PATH apps)
-  return `start "" "${appName}"`;
+  const apps = {
+    'chrome': 'start chrome',
+    'google chrome': 'start chrome',
+    'firefox': 'start firefox',
+    'edge': 'start msedge',
+    'notepad': 'start notepad',
+    'calculator': 'start calc',
+    'paint': 'start mspaint',
+    'word': 'start winword',
+    'excel': 'start excel',
+    'powerpoint': 'start powerpnt',
+    'explorer': 'start explorer',
+    'file explorer': 'start explorer',
+    'cmd': 'start cmd',
+    'terminal': 'start wt',
+    'powershell': 'start powershell',
+    'task manager': 'start taskmgr',
+    'control panel': 'start control',
+    'spotify': 'start spotify',
+    'discord': 'start discord',
+    'steam': 'start steam',
+    'vlc': 'start vlc',
+    'vscode': 'start code',
+    'vs code': 'start code',
+    'visual studio code': 'start code',
+    'zoom': 'start zoom',
+    'slack': 'start slack',
+    'teams': 'start teams',
+  };
+  const key = appName.toLowerCase().trim();
+  return apps[key] || `start ${appName}`;
 }
 
 function formatUptime(seconds) {

@@ -77,7 +77,6 @@ export default function App() {
   const [hotwordEnabled, setHotwordEnabled] = useState(false);
   const [hotwordActive,  setHotwordActive]  = useState(false);
   const [showSetup,      setShowSetup]      = useState(false);
-  const [isWarmingUp,    setIsWarmingUp]    = useState(false);
 
   const { toast, showToast }                       = useToast();
   const { whisperReady, whisperSettingUp, setupWhisper } = useWhisper(showToast);
@@ -116,46 +115,35 @@ export default function App() {
   // ── Boot ──────────────────────────────────────────────────────
   useEffect(() => {
     async function boot() {
-      // Load config first, capture values locally so the Ollama status call
-      // below uses the *saved* host — not the stale default from the closure.
-      let savedHost  = 'http://localhost:11434';
-      let savedModel = null;
-      try {
-        const res = await window.aria.loadConfig();
-        const cfg = res?.config || {};
+      // Run all independent loads in parallel — cuts boot time significantly
+      const [cfgRes, sysRes, memRes] = await Promise.allSettled([
+        window.aria.loadConfig(),
+        window.aria.sysInfo(),
+        window.aria.memoryLoad(),
+      ]);
+
+      // Config
+      if (cfgRes.status === 'fulfilled') {
+        const cfg = cfgRes.value?.config || {};
         if (cfg.apiKey)         setClaudeApiKey(cfg.apiKey);
         if (cfg.aiMode)         setAiMode(cfg.aiMode);
-        if (cfg.ollamaHost)     { setOllamaHost(cfg.ollamaHost); savedHost = cfg.ollamaHost; }
-        if (cfg.ollamaModel)    { setOllamaModel(cfg.ollamaModel); savedModel = cfg.ollamaModel; }
+        if (cfg.ollamaHost)     setOllamaHost(cfg.ollamaHost);
+        if (cfg.ollamaModel)    setOllamaModel(cfg.ollamaModel);
         if (cfg.hotwordEnabled) setHotwordEnabled(cfg.hotwordEnabled);
-      } catch(e) { console.warn('Config error:', e); }
+      } else { console.warn('Config error:', cfgRes.reason); }
 
-      try {
-        const res = await window.aria.sysInfo();
-        if (res.ok) setSysInfo(res.info);
-      } catch(e) { console.warn('sysInfo error:', e); }
+      // SysInfo
+      if (sysRes.status === 'fulfilled' && sysRes.value?.ok) {
+        setSysInfo(sysRes.value.info);
+      } else { console.warn('sysInfo error:', sysRes.reason); }
 
-      try {
-        const res = await window.aria.memoryLoad();
-        if (res.ok) setMemory(res.entries || []);
-      } catch(e) { console.warn('Memory error:', e); }
+      // Memory
+      if (memRes.status === 'fulfilled' && memRes.value?.ok) {
+        setMemory(memRes.value.entries || []);
+      } else { console.warn('Memory error:', memRes.reason); }
 
-      // Use the freshly-loaded host/model rather than the stale closure values.
-      try {
-        const res = await window.aria.ollamaStatus(savedHost);
-        setOllamaRunning(res.running || false);
-        setOllamaModels(res.models  || []);
-
-        if (!savedModel && res.models?.length) {
-          const prefer = ['llama3.1','llama3','mistral','qwen','gemma','phi','deepseek'];
-          const found  = prefer.find(p => res.models.some(m => m.name.includes(p)));
-          const picked = found
-            ? res.models.find(m => m.name.includes(found)).name
-            : res.models[0].name;
-          setOllamaModel(picked);
-          try { await window.aria.saveConfig({ ollamaModel: picked }); } catch(_) {}
-        }
-      } catch(e) { console.warn('Ollama status error:', e); }
+      // Check Ollama — after config so we have the right host
+      await refreshOllama(true);
     }
     boot();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -163,23 +151,6 @@ export default function App() {
   useEffect(() => {
     setShowSetup(!ollamaRunning && !claudeApiKey);
   }, [ollamaRunning, claudeApiKey]);
-
-  // Keep the active Ollama model pinned in memory. Starts a 4-minute heartbeat
-  // whenever Ollama is connected and a model is selected; stops it on disconnect
-  // or model change (the new model/host will fire a fresh start on next render).
-  // isWarmingUp is true while the first ping is in flight — the model is loading.
-  useEffect(() => {
-    if (ollamaRunning && ollamaModel) {
-      setIsWarmingUp(true);
-      window.aria.ollamaKeepWarmStart(ollamaModel, ollamaHost)
-        .then(() => setIsWarmingUp(false))
-        .catch(() => setIsWarmingUp(false));
-    } else {
-      window.aria.ollamaKeepWarmStop();
-      setIsWarmingUp(false);
-    }
-    return () => window.aria.ollamaKeepWarmStop();
-  }, [ollamaRunning, ollamaModel, ollamaHost]);
 
   // Show welcome message once AI is connected
   const welcomeShown = useRef(false);
@@ -200,19 +171,25 @@ export default function App() {
     setOllamaRunning(res.running || false);
     setOllamaModels(res.models || []);
 
+    let pickedModel = ollamaModel;
     if (!ollamaModel && res.models?.length) {
       const prefer = ['llama3.1','llama3','mistral','qwen','gemma','phi','deepseek'];
       const found  = prefer.find(p => res.models.some(m => m.name.includes(p)));
-      const picked = found
+      pickedModel = found
         ? res.models.find(m => m.name.includes(found)).name
         : res.models[0].name;
-      setOllamaModel(picked);
-      try { await window.aria.saveConfig({ ollamaModel: picked }); } catch(_) {}
+      setOllamaModel(pickedModel);
+      try { await window.aria.saveConfig({ ollamaModel: pickedModel }); } catch(_) {}
     }
 
     if (!silent) {
       if (res.running) showToast(`Ollama OK · ${res.models?.length || 0} model(s)`, 'success');
       else             showToast(res.error || 'Ollama unreachable', 'error');
+    }
+
+    // Pre-warm the model — fire and forget, loads it into VRAM immediately
+    if (res.running && pickedModel) {
+      window.aria.ollamaPrewarm(pickedModel, ollamaHost).catch(() => {});
     }
   }, [ollamaHost, ollamaModel, showToast]);
 
@@ -253,7 +230,9 @@ export default function App() {
     setOllamaModel(model);
     try { await window.aria.saveConfig({ ollamaModel: model }); } catch(_) {}
     showToast(`Model → ${model}`, 'success');
-  }, [showToast]);
+    // Pre-warm the newly selected model immediately
+    window.aria.ollamaPrewarm(model, ollamaHost).catch(() => {});
+  }, [showToast, ollamaHost]);
 
   const handleClaudeKeySave = useCallback(async (key) => {
     setClaudeApiKey(key);
@@ -278,7 +257,6 @@ export default function App() {
           <ChatPanel
             messages={messages}
             isLoading={isLoading}
-            isWarmingUp={isWarmingUp}
             fuzzyPending={fuzzyPending}
             onFuzzyRun={fuzzyConfirmRun}
             onFuzzyAsk={fuzzyConfirmAsk}

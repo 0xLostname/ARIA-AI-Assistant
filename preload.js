@@ -41,20 +41,17 @@ contextBridge.exposeInMainWorld('aria', {
   aiMessage: (apiKey, messages, systemPrompt) => ipcRenderer.invoke('ai-message', apiKey, messages, systemPrompt),
 
   // Ollama AI
-  ollamaStatus: (host) => ipcRenderer.invoke('ollama-status', host),
-  ollamaPull: (model, host) => ipcRenderer.invoke('ollama-pull', model, host),
-  ollamaChat: (model, messages, systemPrompt, host) => ipcRenderer.invoke('ollama-chat', model, messages, systemPrompt, host),
-  ollamaKeepWarmStart: (model, host) => ipcRenderer.invoke('ollama-keep-warm-start', model, host),
-  ollamaKeepWarmStop:  ()            => ipcRenderer.send('ollama-keep-warm-stop'),
+  ollamaStatus:  (host)             => ipcRenderer.invoke('ollama-status', host),
+  ollamaPull:    (model, host)      => ipcRenderer.invoke('ollama-pull', model, host),
+  ollamaPrewarm: (model, host)      => ipcRenderer.invoke('ollama-prewarm', model, host),
+  ollamaChat:    (model, messages, systemPrompt, host) => ipcRenderer.invoke('ollama-chat', model, messages, systemPrompt, host),
   onStreamToken: (cb) => ipcRenderer.on('aria-stream-token', (_, t) => cb(t)),
   onStreamDone:  (cb) => ipcRenderer.on('aria-stream-done',  (_, f) => cb(f)),
   onStreamError: (cb) => ipcRenderer.on('aria-stream-error', (_, e) => cb(e)),
-  onStreamPing:  (cb) => ipcRenderer.on('aria-stream-ping',  cb),
   removeStreamListeners: () => {
     ipcRenderer.removeAllListeners('aria-stream-token');
     ipcRenderer.removeAllListeners('aria-stream-done');
     ipcRenderer.removeAllListeners('aria-stream-error');
-    ipcRenderer.removeAllListeners('aria-stream-ping');
   },
 
   // Whisper local STT

@@ -213,38 +213,3 @@
   font-family: var(--mono); font-size: 9px;
   color: var(--text-faint); letter-spacing: 0.5px;
 }
-
-/* ── Warming-up banner ───────────────────────────────────────────── */
-.warming-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  margin-bottom: 8px;
-  border-radius: 8px;
-  background: rgba(0, 212, 255, 0.06);
-  border: 1px solid rgba(0, 212, 255, 0.18);
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--cyan);
-  letter-spacing: 0.3px;
-}
-
-.warming-spinner {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 1.5px solid rgba(0, 212, 255, 0.25);
-  border-top-color: var(--cyan);
-  animation: warmingSpin 0.8s linear infinite;
-  flex-shrink: 0;
-}
-
-@keyframes warmingSpin {
-  to { transform: rotate(360deg); }
-}
-
-#chat-input:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
