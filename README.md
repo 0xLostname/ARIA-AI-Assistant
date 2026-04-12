@@ -1,284 +1,203 @@
-# ◈ ARIA — AI Desktop Assistant
+<div align="center">
 
-> Control your Windows PC with natural language. Powered by local AI (Ollama) or Claude API.
+```
+ ◈ ARIA
+```
+
+**AI-Powered Windows Desktop Assistant**
+
+*Control your PC with natural language — fully local, no cloud required*
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-cyan.svg)](LICENSE)
+[![Electron](https://img.shields.io/badge/Electron-28-47848F?logo=electron)](https://electronjs.org)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://react.dev)
+[![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite)](https://vitejs.dev)
+[![Ollama](https://img.shields.io/badge/Ollama-local_AI-black)](https://ollama.com)
+
+</div>
 
 ---
 
-## What is ARIA?
+ARIA is a Windows desktop assistant built with Electron + React that lets you control your PC through natural language — type or speak any command and ARIA executes it. It runs entirely on-device using local LLMs via [Ollama](https://ollama.com), with Claude API as an optional fallback.
 
-ARIA is an Electron-based Windows desktop assistant that lets you control your PC by talking to it. Type or **speak** a command like *"open Chrome"*, *"show my Downloads"*, *"I'm bored"*, or *"take a screenshot"* — and ARIA figures out what you mean and does it.
-
-It runs **fully offline** using [Ollama](https://ollama.com) (local AI models), with an optional Claude API fallback for cloud-powered responses.
+The project started as an experiment in local AI on consumer hardware and grew into a full desktop application with a custom fuzzy-matching memory engine, real-time token streaming, local speech recognition via Whisper, a wake word system, and a React frontend migrated from vanilla JS across four structured sessions.
 
 ---
 
-## Features
+## What It Can Do
 
-| Category | Capabilities |
+| | Capability |
 |---|---|
-| 🚀 **App Launching** | Open any installed app by name — Chrome, Spotify, VS Code, Zoom, etc. |
-| 📁 **File Management** | Browse, open, create, rename, delete, copy, and search files & folders |
-| 🌐 **Web Search** | Search Google, YouTube, or Bing — or open any URL directly |
-| 📸 **Screenshots** | Capture your screen on demand |
-| 📋 **Clipboard** | Read from and write to the clipboard |
-| 💻 **System Info** | See CPU, RAM, uptime, and system details |
-| ⚙️ **Windows Settings** | Jump directly to Display, WiFi, Bluetooth, Sound, or Apps settings |
-| 🖥️ **Terminal Commands** | Run CMD or PowerShell commands |
-| 🎤 **Voice Input** | Click the mic button, speak your command, confirm before sending |
-| 👂 **Wake Word** | Say "Hey ARIA" from anywhere — window pops up, mic starts automatically |
-| ⚡ **Command Memory** | ARIA learns every command you run and replays them instantly next time |
-| 🧠 **Vague Commands** | Say *"I'm bored"* or *"play some music"* — ARIA interprets intent |
+| 🚀 | Launch any installed app by name |
+| 📁 | Full file browser — open, create, rename, delete, search |
+| 🌐 | Web search on Google, YouTube, Bing — or open any URL |
+| 📸 | Take screenshots on demand |
+| 📋 | Read and write the clipboard |
+| 💻 | Show system info — CPU, RAM, uptime |
+| ⚙️ | Jump to any Windows Settings page |
+| 🖥️ | Run CMD or PowerShell commands |
+| 🎤 | Voice input via local Whisper STT — 100% offline |
+| 👂 | "Hey ARIA" wake word — window pops up, mic starts |
+| ⚡ | Command memory — gets faster the more you use it |
+| 🧠 | Vague intent — *"I'm bored"* → opens YouTube |
 
 ---
 
-## Requirements
+## Tech Stack
 
-- **Windows 10 or 11**
-- **Node.js 18+** — [nodejs.org](https://nodejs.org)
-- **One of:**
-  - [Ollama](https://ollama.com) with at least one model pulled *(recommended — fully local)*
-  - An [Anthropic API key](https://console.anthropic.com) for Claude *(cloud)*
+```
+Frontend      React 18 + Vite 5
+Desktop       Electron 28 (main + renderer process architecture)
+Local AI      Ollama (llama.cpp inference — CUDA/CPU)
+Cloud AI      Anthropic Claude API (optional fallback)
+Voice STT     Whisper.cpp (ggml-base.en, fully local)
+Wake Word     Web Speech API (browser-native, hotword only)
+Build         electron-builder → portable .exe
+Data          JSON flat files in %APPDATA%\aria-assistant\
+```
 
 ---
 
-## Installation
+## Architecture
+
+ARIA separates concerns across two OS processes with a strict IPC boundary:
+
+```
+┌─────────────────────────────────────┐    ┌────────────────────────────────┐
+│        MAIN PROCESS — main.js       │    │  RENDERER — React + Vite       │
+│                                     │    │                                │
+│  IPC handlers (ipcMain.handle)      │    │  App.jsx — global state        │
+│  ├─ Ollama HTTP streaming           │◄──►│  ├─ useChat    — AI routing    │
+│  ├─ File system ops                 │    │  ├─ useMemory  — fuzzy engine  │
+│  ├─ App launching (shell: true)     │    │  ├─ useActions — action runner │
+│  ├─ Whisper child process           │    │  └─ 7 panel components         │
+│  ├─ Screenshot / clipboard          │    │                                │
+│  └─ Config + memory persistence     │    │  contextIsolation: true        │
+│                                     │    │  nodeIntegration: false        │
+└──────────────┬──────────────────────┘    └──────────────┬─────────────────┘
+               │        preload.js — contextBridge         │
+               └──────────────────────────────────────────┘
+```
+
+The renderer has zero Node.js access — every OS operation is whitelisted through `preload.js` and called as `window.aria.*`. This is the correct Electron security model.
+
+---
+
+## The Memory System
+
+The most interesting engineering in the project. ARIA automatically learns every command it successfully executes and routes future input through a three-tier system before touching the AI:
+
+**Scoring algorithm — two signals combined:**
+
+```
+Jaccard word overlap (60% weight):
+  "launch chrome" vs "open chrome"
+  overlap = {chrome}, union = {launch, open, chrome}
+  score = 1/3 = 0.33
+
+Character bigram similarity (40% weight):
+  bigrams("chrome") = {ch, hr, ro, om, me}
+  bigrams("chrome") → identical → score = 1.0
+
+  final = (0.33 × 0.6) + (1.0 × 0.4) = 0.60 → fuzzy match
+```
+
+Bigrams catch typos and partial inputs that word overlap misses. Combined scoring handles both semantic variation (different words, same meaning) and surface variation (typos, abbreviations).
+
+**Three routing tiers:**
+
+| Score | Action | Latency |
+|---|---|---|
+| ≥ 0.95 | Instant bypass — AI never involved | ~50ms |
+| 0.60–0.94 | Amber confirm bar — "Run again?" or "Ask AI" | — |
+| < 0.60 | Sent to AI, learned on success | model-dependent |
+
+The result: the more you use ARIA, the more commands get bypassed entirely. Common workflows become effectively instant.
+
+---
+
+## Streaming Pipeline
+
+Token streaming goes through four layers, each with its own batching:
+
+```
+llama.cpp GPU inference
+  → Ollama HTTP chunked response (NDJSON)
+    → main.js res.on('data') — batches tokens per TCP chunk → single IPC send
+      → useChat.js onStreamToken — 30ms flush timer → single setMessages call
+        → React reconciliation → visible text update
+```
+
+Key optimisations in the pipeline:
+- **Main process batching** — all tokens in one HTTP chunk sent as a single `webContents.send` call, reducing IPC overhead by 5–10×
+- **React batching** — 30ms flush timer collapses all tokens in a window into one `setMessages` call, dropping re-renders from one-per-token to ~10/sec max
+- **JSON stripping during stream** — in-progress JSON blocks are hidden from the visible text in real time using regex, so the user sees clean prose while the action is still being generated
+- **Client-side elapsed timer** — `setInterval` in the renderer replaces the old IPC ping that fired every 500ms
+
+---
+
+## TTFT Optimisations
+
+First-token latency was the primary performance target. Every change listed here was measured:
+
+| Change | Mechanism | Impact |
+|---|---|---|
+| `keep_alive: -1` on all requests | Model stays in VRAM between messages | −10–15s cold load |
+| `ollama-prewarm` on startup | Silent 1-token request loads model before first user message | First message instant |
+| `Promise.allSettled` boot | Config + sysInfo + memory load in parallel | −150ms startup |
+| System prompt cached in `promptRef` | Rebuilt only on sysInfo change, not every message | −1ms × N messages |
+| History window 6 → 3 messages | ~100 fewer prompt tokens per request | −50–100ms TTFT |
+| `num_predict` 100 → 80 | Generation stops sooner | Less tail latency |
+| Removed IPC ping timer | Eliminated 2 IPC round-trips per second during streaming | Smoother rendering |
+
+On a warm llama3.1 model: TTFT under 1s. On a cold model: 10–15s (unavoidable — GPU memory load). Pre-warming eliminates the cold case entirely during normal use.
+
+---
+
+## Getting Started
+
+**Requirements:** Windows 10/11, Node.js 18+, and either Ollama or a Claude API key.
 
 ```bash
-# 1. Navigate into the project folder
+git clone https://github.com/yourusername/aria-assistant
 cd aria-assistant
-
-# 2. Install dependencies (React, Vite, Electron)
 npm install
-
-# 3. Build the React frontend
 npm run build
-
-# 4. Launch the app
 npm run electron
 ```
 
-On first launch, ARIA shows a setup screen. Connect Ollama or enter your Claude API key to get started.
-
-> **Dev mode:** Run `npm run dev` to start the Vite dev server with hot-reload, then separately run `npm run electron` to open the Electron window pointing at the built files.
-
----
-
-## Using Ollama (Local AI — Recommended)
-
-Ollama runs AI models entirely on your machine — no internet, no API key, no data sent anywhere.
-
-### Step 1 — Install Ollama
-Download from [ollama.com](https://ollama.com) and install it.
-
----
-
-### ⚠️ STEP 2 — CRITICAL: Enable "Expose Ollama to Network" ⚠️
-
-> **Do this before anything else. This is the #1 reason ARIA can't connect to Ollama.**
-> **Without this step, ARIA will show "Connection refused" no matter what you try.**
-> **It took me 2 hours to figure this out so you don't have to.**
-
-1. Find the **Ollama icon** in your system tray (bottom-right of taskbar)
-2. Right-click it → open **Settings**
-3. Find the option **"Expose Ollama on the network"** (or similar wording)
-4. **Enable it** ✓
-5. Restart Ollama
-
-That's it. One toggle. Done.
-
----
-
-### Step 3 — Pull a model
-Pick one based on your available RAM:
-
-| Model | RAM Required | Quality | Speed |
-|---|---|---|---|
-| `qwen2.5:3b` | ~2 GB | ⭐⭐⭐⭐ | ⚡ Fastest |
-| `phi3:mini` | ~2.5 GB | ⭐⭐⭐ | ⚡ Fastest |
-| `mistral` | ~5 GB | ⭐⭐⭐⭐ | Fast |
-| `qwen2.5` | ~5 GB | ⭐⭐⭐⭐ | Fast |
-| `llama3.1` | ~6 GB | ⭐⭐⭐⭐⭐ | Fast |
-| `gemma2:9b` | ~8 GB | ⭐⭐⭐⭐⭐ | Medium |
+**Ollama setup (recommended — fully local):**
 
 ```bash
-ollama pull llama3.1
-# or for fastest responses on lower-end hardware:
-ollama pull phi3:mini
+# Install from ollama.com, then:
+ollama pull llama3.1        # ~4GB — best quality
+ollama pull phi3:mini       # ~2GB — fastest on low-end hardware
 ```
 
-### Step 4 — Keep the model warm (optional but recommended)
-Pin the model in memory so your first message is instant rather than waiting for a cold load:
-```bash
-ollama run llama3.1 --keepalive -1
-```
-Or set `OLLAMA_KEEP_ALIVE=-1` as a system environment variable.
+> ⚠️ **Critical:** Right-click the Ollama tray icon → Settings → enable **"Expose Ollama on the network"** → restart Ollama. Without this, ARIA cannot connect regardless of anything else.
 
-### Step 5 — Connect
-Open ARIA and click **Connect** in the setup screen. Done.
+Models can also be pulled directly from inside ARIA's Settings panel.
 
-You can also pull models directly inside ARIA from the Settings panel.
+**Claude API (optional):**
+
+Open Settings → paste your `sk-ant-api03-...` key. Stored locally in `%APPDATA%\aria-assistant\config.json`, never transmitted except to Anthropic's API.
 
 ---
 
-## Using Claude API (Cloud)
+## Voice Input
 
-If you prefer Claude or don't want to run Ollama:
+ARIA uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for local speech-to-text — no network call, no Google, nothing leaves the machine.
 
-1. Get an API key at [console.anthropic.com](https://console.anthropic.com)
-2. Open ARIA → Settings → paste your key (`sk-ant-api03-...`) → Save
+First mic click triggers a one-time download of `whisper-cli.exe` + `ggml-base.en.bin` (~150MB total) to `%APPDATA%\aria-assistant\whisper\`. After that:
 
-Your key is stored locally at `%APPDATA%\aria-assistant\config.json` and never shared.
-
----
-
-## Voice Input 🎙️
-
-ARIA uses **Whisper** for 100% local speech-to-text — no internet required, no Google, no data leaves your machine.
-
-### First-time setup (one-time only)
-1. Click the **🎤** mic button — ARIA will detect Whisper isn't set up yet
-2. It automatically downloads two things (~150 MB total, one time):
-   - `whisper-cli.exe` — the whisper.cpp binary for Windows
-   - `ggml-base.en.bin` — the English speech model
-3. Files are saved to `%APPDATA%\aria-assistant\whisper\`
-4. Once done, the mic is ready to use immediately
-
-You can also go to **Settings → 🎙️ Voice Input** to trigger setup manually and see status.
-
-### How to use
-1. Click **🎤** to start recording — button turns red and pulses
+1. Click **🎤** — button turns red and pulses
 2. Speak your command
-3. Click **⏹** to stop — button shows **💭** while transcribing (takes 1–3 seconds)
-4. A confirm bar slides up showing your transcript
-5. Click **⚡ Send** to send it, or **✕ Cancel** to discard
+3. Click **⏹** — Whisper processes audio locally (~200ms per second of speech)
+4. Confirm bar shows transcript → **⚡ Send** or **✕ Cancel**
 
-### Voice + Command Memory
-Spoken commands go through the same fuzzy matching as typed commands — saying *"launch chrome"* will match *"open chrome"* from memory and show the amber "Run again?" prompt.
+Spoken commands run through the same memory matching as typed ones — saying "launch chrome" matches "open chrome" from memory.
 
-### Notes
-- Fully offline after setup — no network calls ever
-- Based on `ggml-base.en` — fast and accurate for short commands
-- Works with the **"Hey ARIA"** wake word — mic auto-starts after detection
-
----
-
-## Wake Word 👂
-
-Say **"Hey ARIA"** at any time — even when the window is hidden — and ARIA pops up with the mic already listening.
-
-**Setup:**
-1. Open Settings → toggle **Wake word** on
-2. The `👂 WAKE` pill in the titlebar pulses green when active
-3. Minimise ARIA to the tray — hotword listener starts automatically
-4. Say *"Hey ARIA"* → window appears, logo flashes cyan, mic starts
-
-**Notes:**
-- Requires microphone permission — Windows will prompt you the first time
-- Listener pauses while you're actively speaking a command, resumes after
-- Handles common mishears: "hey area", "hey era", "hey raya"
-- Toggle state persists across restarts
-
----
-
-## Command Memory ⚡
-
-ARIA automatically learns every command it successfully executes. Nothing to configure — it just gets faster as you use it.
-
-**Three tiers:**
-
-| Match strength | Threshold | Behaviour |
-|---|---|---|
-| **Exact** | ≥ 95% similarity | Runs instantly, no AI involved — `⚡ instant` badge |
-| **Fuzzy** | 60–94% | Amber prompt: **▶ Run again** or **🤖 Ask AI** |
-| **No match** | < 60% | Sent to AI as normal, learned if it succeeds |
-
-**Voice + fuzzy:** Spoken commands match memory the same way typed commands do — saying "launch chrome" will match "open chrome" from memory.
-
-**Autocomplete:** After 2+ characters, matching past commands appear in a dropdown with match % and use count.
-
-**⚡ Learned Commands panel:** Sidebar tab showing everything memorised, with the action it maps to and run count. Click ▶ to run any instantly, 🗑 to forget it.
-
-Memory stored in `%APPDATA%\aria-assistant\memory.json`, persists across sessions.
-
----
-
-## Example Commands
-
-**Apps:**
-```
-open Chrome
-launch Spotify
-start VS Code
-open the calculator
-```
-
-**Files:**
-```
-show my Desktop
-open Downloads folder
-create a file called notes.txt on my Desktop
-find budget.xlsx in Documents
-rename old-report.docx to final-report.docx
-```
-
-**Web:**
-```
-search YouTube for lofi music
-google the weather in Tokyo
-open github.com
-```
-
-**System:**
-```
-take a screenshot
-what's in my clipboard
-show PC stats
-open sound settings
-run ipconfig in CMD
-```
-
-**Vague (ARIA figures it out):**
-```
-I'm bored
-play some music
-I need to write something
-let's video call
-how is my PC doing
-```
-
----
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|---|---|
-| `Enter` | Send message |
-| `Shift + Enter` | New line in input |
-| `Ctrl + Shift + A` | Toggle ARIA window globally (even when minimised) |
-
----
-
-## Panels
-
-**Chat** — Main interface. Type or speak. Responses stream token-by-token.
-
-**Files** — Visual file browser with breadcrumb navigation and search.
-
-**Apps** — One-click launch grid for 18 common apps.
-
-**⚡ Learned Commands** — Everything ARIA has memorised. Run or forget any command.
-
-**Settings** — AI backend config, wake word toggle, system info, Ollama debug, Windows Settings shortcuts.
-
----
-
-## Performance Notes
-
-- **Streaming** — First tokens appear within ~200ms of the model starting
-- **Compact prompt** — ~180 tokens vs ~600 originally; significantly faster TTFT
-- **Memory bypass** — Exact command matches skip the AI entirely and run in ~50ms
-- **Low token cap** — `num_predict: 150` — enough for one sentence + JSON, nothing wasted
-- **GPU acceleration** — Ollama uses your NVIDIA GPU automatically if CUDA is installed
+**Wake word:** Enable in Settings → say "Hey ARIA" from anywhere → window appears, mic starts automatically. Also handles common mishears ("hey area", "hey raya").
 
 ---
 
@@ -288,7 +207,7 @@ how is my PC doing
 npm run dist
 ```
 
-This runs `vite build` first, then packages everything with electron-builder. Produces `dist/ARIA-Assistant-Setup.exe` — runs on any Windows 10/11 machine without Node.js.
+Runs `vite build` then `electron-builder`. Output: `dist/ARIA-Assistant-Setup.exe` — runs on any Windows 10/11 machine, no Node.js required.
 
 ---
 
@@ -296,132 +215,89 @@ This runs `vite build` first, then packages everything with electron-builder. Pr
 
 ```
 aria-assistant/
-├── main.js          ← Electron main process — OS operations + IPC handlers
-├── preload.js       ← Secure IPC bridge (contextBridge)
-├── vite.config.js   ← Vite build config (outputs to dist/)
-├── package.json     ← Dependencies: React, Vite, Electron
-├── dist/            ← Built React app (generated by npm run build)
-├── assets/
+├── main.js              Electron main process — all IPC handlers, OS ops, Ollama HTTP
+├── preload.js           contextBridge — whitelisted IPC surface exposed to renderer
+├── vite.config.js       Vite config — outputs to dist/, base: './' for Electron
+├── package.json
 └── src/
-    ├── index.html   ← Vite entry point
-    ├── main.jsx     ← React root mount
-    ├── App.jsx      ← Root component — global state, boot, panel routing
+    ├── main.jsx         React root
+    ├── App.jsx          Global state, boot sequence, panel routing
     ├── styles/
-    │   └── globals.css       ← CSS variables, resets, shared styles
+    │   └── globals.css  CSS custom properties, resets, shared animations
     ├── hooks/
-    │   ├── useMemory.js      ← Fuzzy matching, save/delete, autocomplete
-    │   ├── useActions.js     ← Action executor (all 18 action types)
-    │   └── useChat.js        ← sendMessage, streaming, AI routing, message state
+    │   ├── useChat.js   sendMessage, Ollama streaming, Claude fallback, message state
+    │   ├── useMemory.js Fuzzy scoring, save/delete/clear, autocomplete matching
+    │   └── useActions.js parseAndRun (JSON extraction), runAction (18 action types)
     └── components/
-        ├── Titlebar.jsx/.css
-        ├── Sidebar.jsx/.css
-        ├── ChatPanel.jsx/.css
-        ├── FilesPanel.jsx/.css
-        ├── AppsPanel.jsx/.css
-        ├── MacrosPanel.jsx/.css
-        └── SettingsPanel.jsx/.css
+        ├── Titlebar     Logo, status pills, window controls
+        ├── Sidebar      Navigation, quick access, AI backend widget
+        ├── ChatPanel    Message list, input bar, voice confirm, fuzzy confirm, autocomplete
+        ├── FilesPanel   File browser, breadcrumb, search, create/delete
+        ├── AppsPanel    18-app launch grid
+        ├── MacrosPanel  Learned commands — view, run, delete
+        └── SettingsPanel All config — AI mode, Ollama, Claude, Whisper, debug, sysinfo
 ```
 
-### Data Stored Locally
+**Local data:**
 
-| File | Contents |
+| Path | Contents |
 |---|---|
-| `%APPDATA%\aria-assistant\config.json` | API key, AI mode, Ollama host/model, hotword enabled |
-| `%APPDATA%\aria-assistant\memory.json` | Learned commands (phrase → action, use count, timestamp) |
+| `%APPDATA%\aria-assistant\config.json` | AI mode, model, host, hotword, API key |
+| `%APPDATA%\aria-assistant\memory.json` | Learned commands — phrase, action, use count, timestamp |
+| `%APPDATA%\aria-assistant\whisper\` | whisper-cli.exe + ggml-base.en.bin |
+
+---
+
+## Security Model
+
+- `contextIsolation: true`, `nodeIntegration: false` — renderer is sandboxed, no direct Node access
+- All OS operations go through the `preload.js` contextBridge whitelist
+- No telemetry, no analytics, no external requests except Ollama (localhost) and optionally Anthropic API
+- API keys stored in local JSON only, never logged or transmitted beyond their intended endpoint
+- Mic access scoped to the ARIA window only
 
 ---
 
 ## Troubleshooting
 
-**"Connection refused" / can't reach Ollama:**
-→ You haven't enabled **"Expose Ollama on the network"** in Ollama's settings. Right-click the Ollama tray icon → Settings → enable that option → restart Ollama. This is the answer 99% of the time.
+**"Connection refused"** → Enable "Expose Ollama on the network" in Ollama tray → Settings. This is the cause 99% of the time.
 
-**No response / long wait:**
-Open Settings → **Debug** → **▶ Send test message**. Common causes:
-- Ollama not running — run `ollama serve`
-- Model cold on first load — wait 10–20s or use `--keepalive -1`
-- Model name mismatch — check Settings → Model dropdown
+**Long wait before first token** → Model is cold-loading into VRAM. Happens once per session. ARIA pre-warms on startup automatically; if it's still slow, try a smaller model (`phi3:mini`, `qwen2.5:3b`).
 
-**"No models" after connecting:**
-Run `ollama pull llama3.1` in terminal, or use the pull field in ARIA Settings.
+**White screen on launch** → Run `npm run build` before `npm run electron`. The `dist/` folder must exist.
 
-**Wake word not detecting:**
-- Check the `👂 WAKE` pill is green (not grey)
-- Check Windows Privacy → Microphone — make sure ARIA has access
-- The listener only runs when the window is minimised/hidden
-- Speak clearly: "Hey ARIA" with a slight natural pause
+**No models in dropdown** → Run `ollama pull llama3.1` in terminal, or use the pull field in ARIA Settings.
 
-**Voice says "network error":**
-→ This is the old Web Speech API bug. Update to v2.3+ — voice now uses Whisper locally, no internet needed.
-
-**Voice transcription is slow:**
-→ First transcription after a cold start takes 2–4 seconds. Subsequent ones are faster. If your PC is very slow, the `ggml-tiny.en` model is smaller and faster — replace `ggml-base.en.bin` in `%APPDATA%\aria-assistant\whisper\`.
-
-**Whisper setup download fails:**
-→ Check your internet connection — the one-time download needs internet. After that, voice works fully offline. If the download keeps failing, download `whisper-bin-x64.zip` from the whisper.cpp GitHub releases and `ggml-base.en.bin` from Hugging Face manually, and place both extracted files in `%APPDATA%\aria-assistant\whisper\`.
-
-**Wrong action executed:**
-Try a larger model (`llama3.1`, `mistral`) or be more specific in your command.
-
-**App won't start / white screen:**
-Make sure you ran `npm run build` before `npm run electron` — the `dist/` folder must exist. Check `node --version` — needs 18+.
-
-**Global shortcut not working:**
-`Ctrl+Shift+A` may conflict with another app. Update `globalShortcut.register` in `main.js`.
-
----
-
-## Security
-
-- `contextIsolation: true`, `nodeIntegration: false` — renderer has no direct Node access
-- All OS operations go through the `preload.js` IPC bridge
-- API keys stored locally only, never transmitted
-- Ollama runs entirely on-device — no data leaves your machine
-- Mic permission granted only to ARIA's window
+**Whisper download fails** → Download `whisper-bin-x64.zip` from the [whisper.cpp releases](https://github.com/ggerganov/whisper.cpp/releases) and `ggml-base.en.bin` from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp) manually → place both in `%APPDATA%\aria-assistant\whisper\`.
 
 ---
 
 ## Changelog
 
-### v3.0 — React + Vite Frontend
-- **Full React migration** — frontend rewritten from a 1700-line vanilla JS file into clean React components
-- **Vite build system** — hot module replacement in dev, optimised production bundle
-- **Component architecture** — `Titlebar`, `Sidebar`, `ChatPanel`, `FilesPanel`, `AppsPanel`, `MacrosPanel`, `SettingsPanel`
-- **Custom hooks** — `useChat`, `useMemory`, `useActions` encapsulate all logic cleanly
-- **No breaking changes** — all v2.x features preserved: streaming, memory, voice, hotword, fuzzy match
-- **Bug fixes** — 8 bugs fixed during migration: state declaration order, timestamp rendering, suggestion mutation, voice state transitions, null guard crashes, stale settings inputs, missing file navigation callback
+### v3.0 — React + Vite migration + performance pass
+- Rewrote entire frontend from a 1700-line vanilla JS monolith into React 18 + Vite with 7 components and 3 custom hooks (`useChat`, `useMemory`, `useActions`)
+- Full TTFT optimisation pass: `keep_alive: -1`, model pre-warming, `Promise.allSettled` boot, 30ms token batching, IPC ping removal, prompt caching, context window reduction
+- 8 bugs fixed during migration (state declaration order, timestamp re-renders, array mutation in render, voice state race condition, null guard crashes, stale prop sync)
 
-### v2.3 — Local Voice (Whisper)
-- **Replaced Web Speech API** — no more "network error", no Google, no internet dependency
-- **Whisper local STT** — uses whisper.cpp (`ggml-base.en`) via `MediaRecorder` → temp WAV → subprocess → transcript
-- **Auto-setup** — first mic click triggers one-time download of `whisper-cli.exe` + model (~150 MB)
-- **Progress toasts** — real-time download % shown during setup
-- **💭 Transcribing state** — mic button shows thinking indicator while Whisper processes audio
-- **Settings panel** — new 🎙️ Voice Input section shows Whisper status and manual setup trigger
-- **Wake word compatible** — "Hey ARIA" still works; mic auto-starts via MediaRecorder after detection
+### v2.3 — Local voice (Whisper)
+- Replaced Web Speech API (required internet) with local whisper.cpp via `MediaRecorder` → WebM blob → temp file → subprocess → transcript
+- One-time auto-download of binary + model with progress toasts
+- Transcribing state indicator, Settings panel Whisper section
 
-### v2.2 — Wake Word
-- **"Hey ARIA" hotword** — always-on background listener; say it from anywhere to pop the window and start the mic
-- **Auto mic start** — no button click needed after wake word detection
-- **Mishear tolerance** — also catches "hey area", "hey era", "hey raya"
-- **Smart pause/resume** — hotword pauses while command mic is active or window is focused
-- **Visual feedback** — logo flashes cyan on detection; `👂 WAKE` pill pulses green in titlebar
-- **Persisted** — toggle state saved to config, restored on launch
-- **`window-show` IPC** — new handler to restore window from tray/minimised state
+### v2.2 — Wake word
+- Always-on "Hey ARIA" hotword listener using Web Speech API
+- Window restore from tray, mic auto-start, mishear tolerance, visual feedback, persisted toggle
 
-### v2.1 — Command Memory
-- **Auto-learning** — every successfully executed command saved to `memory.json`
-- **Instant replay** — ≥95% match bypasses AI entirely, runs in ~50ms
-- **Fuzzy match prompt** — 60–94% match shows amber bar: Run again or Ask AI
-- **Voice + fuzzy** — spoken commands match memory the same way typed ones do
-- **Autocomplete** — matching past commands appear as you type
-- **⚡ Learned Commands panel** — view, run, and delete all memorised commands
+### v2.1 — Command memory
+- Auto-learning from successful executions
+- Jaccard + bigram fuzzy scoring, three-tier routing (instant / confirm / AI)
+- Autocomplete dropdown, Learned Commands panel
 
 ### v2.0
-- Streaming responses, voice input, compressed prompt, Auto AI mode, multiple bug fixes
+- Streaming responses, multi-action IPC, Auto AI mode
 
 ---
 
 ## License
 
-MIT
+MIT — do whatever you want with it.
