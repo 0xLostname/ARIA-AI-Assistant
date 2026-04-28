@@ -14,7 +14,7 @@
 [![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite)](https://vitejs.dev)
 [![Ollama](https://img.shields.io/badge/Ollama-local_AI-black)](https://ollama.com)
 
-</div>
+</div> 
 
 ---
 
